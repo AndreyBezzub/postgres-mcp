@@ -3,6 +3,9 @@
 from .bind_params import ColumnCollector
 from .bind_params import SqlBindParams
 from .bind_params import TableAliasVisitor
+from .db_conn_pool_registry import DatabaseValidationError
+from .db_conn_pool_registry import DbConnPoolRegistry
+from .db_conn_pool_registry import ValidationResult
 from .extension_utils import check_extension
 from .extension_utils import check_hypopg_installation_status
 from .extension_utils import check_postgres_version_requirement
@@ -16,12 +19,15 @@ from .sql_driver import obfuscate_password
 
 __all__ = [
     "ColumnCollector",
+    "DatabaseValidationError",
     "DbConnPool",
+    "DbConnPoolRegistry",
     "IndexDefinition",
     "SafeSqlDriver",
     "SqlBindParams",
     "SqlDriver",
     "TableAliasVisitor",
+    "ValidationResult",
     "check_extension",
     "check_hypopg_installation_status",
     "check_postgres_version_requirement",

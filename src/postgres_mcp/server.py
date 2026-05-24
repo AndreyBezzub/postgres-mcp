@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any
 from typing import List
 from typing import Literal
+from typing import Optional
 from typing import Union
 
 import mcp.types as types
@@ -27,11 +28,11 @@ from .explain import ExplainPlanTool
 from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.llm_opt import LLMOptimizerTool
 from .index.presentation import TextPresentation
-from .sql import DbConnPool
+from .sql import DatabaseValidationError
+from .sql import DbConnPoolRegistry
 from .sql import SafeSqlDriver
 from .sql import SqlDriver
 from .sql import check_hypopg_installation_status
-from .sql import obfuscate_password
 from .top_queries import TopQueriesCalc
 
 # Initialize FastMCP with default settings
@@ -40,6 +41,11 @@ mcp = FastMCP("postgres-mcp")
 # Constants
 PG_STAT_STATEMENTS = "pg_stat_statements"
 HYPOPG_EXTENSION = "hypopg"
+DATABASE_NAME_PARAM_DESC = "Target database name. Call list_databases for available names."
+PG_STAT_STATEMENTS_SCOPE_NOTE = (
+    f"\n\nNote: {PG_STAT_STATEMENTS} has server-global scope; results include queries from all "
+    "databases on this PG server, not just the selected database_name."
+)
 
 ResponseType = List[types.TextContent | types.ImageContent | types.EmbeddedResource]
 
@@ -54,21 +60,20 @@ class AccessMode(str, Enum):
 
 
 # Global variables
-db_connection = DbConnPool()
+db_registry = DbConnPoolRegistry()
 current_access_mode = AccessMode.UNRESTRICTED
 shutdown_in_progress = False
 
 
-async def get_sql_driver() -> Union[SqlDriver, SafeSqlDriver]:
-    """Get the appropriate SQL driver based on the current access mode."""
-    base_driver = SqlDriver(conn=db_connection)
-
+async def get_sql_driver(database_name: Optional[str]) -> Union[SqlDriver, SafeSqlDriver]:
+    """Get the SQL driver for a specific database, honoring the current access mode."""
+    if database_name is None and db_registry.mode == "single":
+        database_name = db_registry.get_names()[0]  # backward-compatible default
+    pool = await db_registry.get_pool(database_name)  # raises DatabaseValidationError if None/unknown
+    base_driver = SqlDriver(conn=pool)
     if current_access_mode == AccessMode.RESTRICTED:
-        logger.debug("Using SafeSqlDriver with restrictions (RESTRICTED mode)")
-        return SafeSqlDriver(sql_driver=base_driver, timeout=30)  # 30 second timeout
-    else:
-        logger.debug("Using unrestricted SqlDriver (UNRESTRICTED mode)")
-        return base_driver
+        return SafeSqlDriver(sql_driver=base_driver, timeout=30)
+    return base_driver
 
 
 def format_text_response(text: Any) -> ResponseType:
@@ -88,10 +93,12 @@ def format_error_response(error: str) -> ResponseType:
         readOnlyHint=True,
     ),
 )
-async def list_schemas() -> ResponseType:
+async def list_schemas(
+    database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
+) -> ResponseType:
     """List all schemas in the database."""
     try:
-        sql_driver = await get_sql_driver()
+        sql_driver = await get_sql_driver(database_name)
         rows = await sql_driver.execute_query(
             """
             SELECT
@@ -121,12 +128,13 @@ async def list_schemas() -> ResponseType:
     ),
 )
 async def list_objects(
+    database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
     schema_name: str = Field(description="Schema name"),
     object_type: str = Field(description="Object type: 'table', 'view', 'sequence', or 'extension'", default="table"),
 ) -> ResponseType:
     """List objects of a given type in a schema."""
     try:
-        sql_driver = await get_sql_driver()
+        sql_driver = await get_sql_driver(database_name)
 
         if object_type in ("table", "view"):
             table_type = "BASE TABLE" if object_type == "table" else "VIEW"
@@ -195,13 +203,14 @@ async def list_objects(
     ),
 )
 async def get_object_details(
+    database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
     schema_name: str = Field(description="Schema name"),
     object_name: str = Field(description="Object name"),
     object_type: str = Field(description="Object type: 'table', 'view', 'sequence', or 'extension'", default="table"),
 ) -> ResponseType:
     """Get detailed information about a database object."""
     try:
-        sql_driver = await get_sql_driver()
+        sql_driver = await get_sql_driver(database_name)
 
         if object_type in ("table", "view"):
             # Get columns
@@ -334,6 +343,7 @@ async def get_object_details(
     ),
 )
 async def explain_query(
+    database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
     sql: str = Field(description="SQL query to explain"),
     analyze: bool = Field(
         description="When True, actually runs the query to show real execution statistics instead of estimates. "
@@ -363,7 +373,7 @@ If there is no hypothetical index, you can pass an empty list.""",
         hypothetical_indexes: Optional list of indexes to simulate
     """
     try:
-        sql_driver = await get_sql_driver()
+        sql_driver = await get_sql_driver(database_name)
         explain_tool = ExplainPlanTool(sql_driver=sql_driver)
         result: ExplainPlanArtifact | ErrorResult | None = None
 
@@ -413,11 +423,12 @@ If there is no hypothetical index, you can pass an empty list.""",
 
 # Query function declaration without the decorator - we'll add it dynamically based on access mode
 async def execute_sql(
+    database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
     sql: str = Field(description="SQL to run", default="all"),
 ) -> ResponseType:
     """Executes a SQL query against the database."""
     try:
-        sql_driver = await get_sql_driver()
+        sql_driver = await get_sql_driver(database_name)
         rows = await sql_driver.execute_query(sql)  # type: ignore
         if rows is None:
             return format_text_response("No results")
@@ -435,20 +446,22 @@ async def execute_sql(
     ),
 )
 @validate_call
+# database_name placed last due to @validate_call's required-before-optional constraint
 async def analyze_workload_indexes(
     max_index_size_mb: int = Field(description="Max index size in MB", default=10000),
     method: Literal["dta", "llm"] = Field(description="Method to use for analysis", default="dta"),
+    database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
 ) -> ResponseType:
     """Analyze frequently executed queries in the database and recommend optimal indexes."""
     try:
-        sql_driver = await get_sql_driver()
+        sql_driver = await get_sql_driver(database_name)
         if method == "dta":
             index_tuning = DatabaseTuningAdvisor(sql_driver)
         else:
             index_tuning = LLMOptimizerTool(sql_driver)
         dta_tool = TextPresentation(sql_driver, index_tuning)
         result = await dta_tool.analyze_workload(max_index_size_mb=max_index_size_mb)
-        return format_text_response(result)
+        return format_text_response(f"{result}{PG_STAT_STATEMENTS_SCOPE_NOTE}")
     except Exception as e:
         logger.error(f"Error analyzing workload: {e}")
         return format_error_response(str(e))
@@ -462,10 +475,12 @@ async def analyze_workload_indexes(
     ),
 )
 @validate_call
+# database_name placed last due to @validate_call's required-before-optional constraint
 async def analyze_query_indexes(
     queries: list[str] = Field(description="List of Query strings to analyze"),
     max_index_size_mb: int = Field(description="Max index size in MB", default=10000),
     method: Literal["dta", "llm"] = Field(description="Method to use for analysis", default="dta"),
+    database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
 ) -> ResponseType:
     """Analyze a list of SQL queries and recommend optimal indexes."""
     if len(queries) == 0:
@@ -474,7 +489,7 @@ async def analyze_query_indexes(
         return format_error_response(f"Please provide a list of up to {MAX_NUM_INDEX_TUNING_QUERIES} queries to analyze.")
 
     try:
-        sql_driver = await get_sql_driver()
+        sql_driver = await get_sql_driver(database_name)
         if method == "dta":
             index_tuning = DatabaseTuningAdvisor(sql_driver)
         else:
@@ -504,6 +519,7 @@ async def analyze_query_indexes(
     ),
 )
 async def analyze_db_health(
+    database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
     health_type: str = Field(
         description=f"Optional. Valid values are: {', '.join(sorted([t.value for t in HealthType]))}.",
         default="all",
@@ -515,9 +531,14 @@ async def analyze_db_health(
         health_type: Comma-separated list of health check types to perform.
                     Valid values: index, connection, vacuum, sequence, replication, buffer, constraint, all
     """
-    health_tool = DatabaseHealthTool(await get_sql_driver())
-    result = await health_tool.health(health_type=health_type)
-    return format_text_response(result)
+    try:
+        sql_driver = await get_sql_driver(database_name)
+        health_tool = DatabaseHealthTool(sql_driver)
+        result = await health_tool.health(health_type=health_type)
+        return format_text_response(result)
+    except Exception as e:
+        logger.error(f"Error analyzing database health: {e}")
+        return format_error_response(str(e))
 
 
 @mcp.tool(
@@ -529,6 +550,7 @@ async def analyze_db_health(
     ),
 )
 async def get_top_queries(
+    database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
     sort_by: str = Field(
         description="Ranking criteria: 'total_time' for total execution time or 'mean_time' for mean execution time per call, or 'resources' "
         "for resource-intensive queries",
@@ -537,21 +559,51 @@ async def get_top_queries(
     limit: int = Field(description="Number of queries to return when ranking based on mean_time or total_time", default=10),
 ) -> ResponseType:
     try:
-        sql_driver = await get_sql_driver()
+        sql_driver = await get_sql_driver(database_name)
         top_queries_tool = TopQueriesCalc(sql_driver=sql_driver)
 
         if sort_by == "resources":
             result = await top_queries_tool.get_top_resource_queries()
-            return format_text_response(result)
+            return format_text_response(f"{result}{PG_STAT_STATEMENTS_SCOPE_NOTE}")
         elif sort_by == "mean_time" or sort_by == "total_time":
             # Map the sort_by values to what get_top_queries_by_time expects
             result = await top_queries_tool.get_top_queries_by_time(limit=limit, sort_by="mean" if sort_by == "mean_time" else "total")
         else:
             return format_error_response("Invalid sort criteria. Please use 'resources' or 'mean_time' or 'total_time'.")
-        return format_text_response(result)
+        return format_text_response(f"{result}{PG_STAT_STATEMENTS_SCOPE_NOTE}")
     except Exception as e:
         logger.error(f"Error getting slow queries: {e}")
         return format_error_response(str(e))
+
+
+@mcp.tool(
+    description="List the databases this server is configured to access.",
+    annotations=ToolAnnotations(
+        title="List Databases",
+        readOnlyHint=True,
+    ),
+)
+async def list_databases() -> dict[str, Any]:
+    """Return the registered database names and the server mode."""
+    return {"databases": db_registry.get_names(), "mode": db_registry.mode}
+
+
+def _inject_database_name_description(desc: str) -> None:
+    """Patch the database_name parameter description on every registered tool.
+
+    Mutates tool.parameters in place; FastMCP reads this dict by reference when
+    serving protocol-level list_tools, so the change is visible immediately.
+    Verified on mcp >=1.25.0.
+    """
+    # Guards against future mcp SDK changes to the internal tool-registry API:
+    # a broken description patch must not abort server startup.
+    try:
+        for tool in mcp._tool_manager.list_tools():  # pyright: ignore[reportPrivateUsage]
+            props = tool.parameters.get("properties", {})
+            if "database_name" in props:
+                props["database_name"]["description"] = desc
+    except Exception as e:
+        logger.warning(f"Could not inject database_name descriptions: {e}")
 
 
 async def main():
@@ -564,6 +616,13 @@ async def main():
         choices=[mode.value for mode in AccessMode],
         default=AccessMode.UNRESTRICTED.value,
         help="Set SQL access mode: unrestricted (unrestricted) or restricted (read-only with protections)",
+    )
+    parser.add_argument(
+        "--databases",
+        type=str,
+        default=None,
+        help="Comma-separated database names on the same PG server to expose (multi-DB mode). "
+        "If omitted, single-DB mode uses the dbname from DATABASE_URI.",
     )
     parser.add_argument(
         "--transport",
@@ -603,6 +662,8 @@ async def main():
     global current_access_mode
     current_access_mode = AccessMode(args.access_mode)
 
+    database_names = list(dict.fromkeys(d.strip() for d in args.databases.split(",") if d.strip())) if args.databases else None
+
     # Add the query tool with a description and annotations appropriate to the access mode
     if current_access_mode == AccessMode.UNRESTRICTED:
         mcp.add_tool(
@@ -633,17 +694,33 @@ async def main():
             "Error: No database URL provided. Please specify via 'DATABASE_URI' environment variable or command-line argument.",
         )
 
-    # Initialize database connection pool
+    # Initialize the database registry (lazy pools)
+    global db_registry
     try:
-        await db_connection.pool_connect(database_url)
-        logger.info("Successfully connected to database and initialized connection pool")
-    except Exception as e:
-        logger.warning(
-            f"Could not connect to database: {obfuscate_password(str(e))}",
-        )
-        logger.warning(
-            "The MCP server will start but database operations will fail until a valid connection is established.",
-        )
+        result = await db_registry.validate_and_register(database_url, database_names)
+    except DatabaseValidationError as e:
+        # Multi-DB mode: discovery DB unreachable. Single-DB mode never connects here
+        # (lazy first-connection), so this only fires when --databases was provided.
+        logger.error(f"Discovery database connection failed: {e}")
+        sys.exit(1)
+
+    if database_names and len(result.registered) == 0:
+        logger.error("None of the requested databases are available: %s", ", ".join(result.missing))
+        sys.exit(1)
+    if result.missing:
+        logger.warning("Skipping databases not found / not connectable: %s", ", ".join(result.missing))
+    logger.info(
+        "Registered %d database(s) in %s mode: %s",
+        len(result.registered),
+        db_registry.mode,
+        ", ".join(result.registered),
+    )
+
+    # dynamic database_name description injection (Phase 2)
+    names = db_registry.get_names()
+    desc = f"Target database. Available: {', '.join(names)}. Required in multi-DB mode; call list_databases for the current list."
+    globals()["DATABASE_NAME_PARAM_DESC"] = desc
+    _inject_database_name_description(desc)
 
     # Set up proper shutdown handling
     try:
@@ -685,7 +762,7 @@ async def shutdown(sig=None):
 
     # Close database connections
     try:
-        await db_connection.close()
+        await db_registry.close_all()
         logger.info("Closed database connections")
     except Exception as e:
         logger.error(f"Error closing database connections: {e}")

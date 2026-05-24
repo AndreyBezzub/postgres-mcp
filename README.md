@@ -236,6 +236,37 @@ Many MCP clients have similar configuration files to Claude Desktop, and you can
 - If you are using Goose run `goose configure`, then select `Add Extension`.
 - If you are using Qodo Gen, open the Chat panel, click `Connect more tools`, click `+ Add new MCP`, then add the new configuration.
 
+## Multi-database mode
+
+A single Postgres MCP Pro server can expose several databases that live on the **same** PostgreSQL host and share **one** set of credentials. Pass `--databases` with a comma-separated list of database names:
+
+```json
+{
+  "mcpServers": {
+    "postgres": {
+      "command": "postgres-mcp",
+      "args": [
+        "--access-mode=unrestricted",
+        "--databases=orders,catalog,users"
+      ],
+      "env": {
+        "DATABASE_URI": "postgresql://username:password@localhost:5432/postgres"
+      }
+    }
+  }
+}
+```
+
+How it works:
+
+- All databases share the host, port, and credentials from `DATABASE_URI`; only the database name is swapped per connection.
+- At startup the server connects once to the **discovery database** — the dbname embedded in `DATABASE_URI` (or `postgres` if the URI has no path) — and validates each requested name against `pg_database`. Names that do not exist or do not allow connections are skipped with a warning; if none are valid the server exits.
+- Connection pools are opened **lazily** — a database is connected only on the first tool call that targets it.
+- Every tool accepts a `database_name` parameter. The LLM passes the target database per call. Call the `list_databases` tool to see the available names and the current mode (`single` or `multi`).
+- When `--databases` is omitted the server runs in **single-DB mode**: it uses the dbname from `DATABASE_URI` as the sole database, and `database_name` defaults to it so callers may omit the parameter (behavior is unchanged from previous releases).
+
+> **Limitation — `pg_stat_statements` is server-global.** The `pg_stat_statements` extension tracks statements across all databases on the server, so `get_top_queries` and `analyze_workload_indexes` report queries from the **entire server** regardless of the `database_name` you pass. The view also only exists in databases where `CREATE EXTENSION pg_stat_statements` has been run; querying it from a database without the extension fails.
+
 ## SSE Transport
 
 Postgres MCP Pro supports the [SSE transport](https://modelcontextprotocol.io/docs/concepts/transports#server-sent-events-sse), which allows multiple MCP clients to share one server, possibly a remote server.
