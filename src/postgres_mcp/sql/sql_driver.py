@@ -39,7 +39,7 @@ def obfuscate_password(text: str | None) -> str | None:
         pass
 
     # Handle strings that contain connection strings but aren't proper URLs
-    # Match postgres://user:password@host:port/dbname pattern
+    # Match a Postgres connection URL embedded in text and redact its password
     url_pattern = re.compile(r"(postgres(?:ql)?:\/\/[^:]+:)([^@]+)(@[^\/\s]+)")
     text = re.sub(url_pattern, r"\1****\3", text)
 
