@@ -183,3 +183,8 @@ devenv.local.nix
 # pre-commit
 .pre-commit-config.yaml
 *.sql
+
+# HootCore internal working files (handoff/context, infra coordinates).
+# NEVER push these to the public upstream (crystaldba/postgres-mcp).
+.workspace/
+.venv-wsl/
