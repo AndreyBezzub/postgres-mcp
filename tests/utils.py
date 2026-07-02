@@ -131,7 +131,10 @@ def create_postgres_container(version: str) -> Generator[Tuple[str, str], None, 
             logger.error(f"Timeout waiting for PostgreSQL. Container logs:\n{logs[-2000:]}")
             pytest.skip(f"Timeout waiting for PostgreSQL to start: {last_error}")
 
-        connection_string = f"postgresql://postgres:{postgres_password}@localhost:{port}/{postgres_db}"
+        # Use 127.0.0.1, not "localhost": the container is bound to 127.0.0.1 (see ports=
+        # above), but on Windows "localhost" resolves to ::1 (IPv6) first, and psycopg's
+        # async pool does not fall back to IPv4 -> connections hang until PoolTimeout.
+        connection_string = f"postgresql://postgres:{postgres_password}@127.0.0.1:{port}/{postgres_db}"
         logger.info(f"PostgreSQL connection string: {connection_string}")
 
         yield connection_string, version
