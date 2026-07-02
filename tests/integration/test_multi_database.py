@@ -70,7 +70,9 @@ class TestMultiDatabase:
                 patch("postgres_mcp.server.db_registry", reg),
                 patch("postgres_mcp.server.current_access_mode", AccessMode.UNRESTRICTED),
             ):
-                response = await server.list_schemas(database_name="nonexistent")
+                # environment=None mirrors how FastMCP resolves the Field(None) default
+                # (a direct call would otherwise leave it as a raw FieldInfo object).
+                response = await server.list_schemas(environment=None, database_name="nonexistent")
             text = response[0].text
             assert "Error" in text
             assert "Unknown database 'nonexistent'" in text
@@ -87,7 +89,9 @@ class TestMultiDatabase:
                 patch("postgres_mcp.server.db_registry", reg),
                 patch("postgres_mcp.server.current_access_mode", AccessMode.UNRESTRICTED),
             ):
-                response = await server.list_schemas(database_name=None)
+                # environment=None mirrors how FastMCP resolves the Field(None) default
+                # (a direct call would otherwise leave it as a raw FieldInfo object).
+                response = await server.list_schemas(environment=None, database_name=None)
             text = response[0].text
             assert "Error" in text
             assert "database_name is required" in text

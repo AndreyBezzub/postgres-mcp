@@ -3,6 +3,7 @@ import sys
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 import pytest
 
@@ -336,3 +337,152 @@ async def test_main_dedupes_databases(monkeypatch):
         await server.main()
 
     assert captured["names"] == ["orders", "catalog"]
+
+
+# --------------------------------------------------------------------------- #
+# Multi-environment path (server.run_multi / register_environments) — unit tests
+#
+# These extend the single/multi mock pattern above to *multiple* environments,
+# routing DbConnPool construction to a per-environment mock by URL host. A shared
+# "controller" dict lets a test flip an environment unreachable -> reachable to
+# exercise non-fatal startup, reconnect recovery, and lazy per-touch recovery
+# with no real network / Docker.
+# --------------------------------------------------------------------------- #
+ENV_A_DSN = "postgresql://postgres:secret@host-a:5432/test_db"
+ENV_B_DSN = "postgresql://postgres:secret@host-b:5432/test_db"
+
+
+def _make_env_pool(dbs, controller):
+    """Return a MagicMock DbConnPool standing in for one environment.
+
+    ``controller`` is a dict with a ``"down"`` flag. When truthy, ``pool_connect``
+    raises (an unreachable environment); otherwise it returns a discovery-capable
+    raw pool whose pg_database query yields ``dbs``. The SAME instance backs both
+    the environment's discovery probe and its lazy per-database pools (the registry
+    creates a DbConnPool per (env, db); routing by host returns this one mock).
+    """
+    raw = _make_discovery_pool(dbs)
+    inst = MagicMock()
+    inst.close = AsyncMock()
+
+    async def _connect(*_args, **_kwargs):
+        if controller.get("down"):
+            raise OSError("connection refused")
+        return raw
+
+    inst.pool_connect = AsyncMock(side_effect=_connect)
+    return inst
+
+
+def _make_multi_env_factory(env_by_host):
+    """DbConnPool side_effect routing each URL to its environment mock by host."""
+
+    def factory(url):
+        return env_by_host[urlparse(url).hostname]
+
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_register_environments_non_fatal_records_unreachable():
+    """One unreachable environment is recorded (reachable=False) and never aborts startup."""
+    ctrl_a = {"down": False}
+    ctrl_b = {"down": True}
+    env_by_host = {
+        "host-a": _make_env_pool(["test_db"], ctrl_a),
+        "host-b": _make_env_pool(["test_db"], ctrl_b),
+    }
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        amap = await reg.register_environments(
+            {
+                "envA": {"base_dsn": ENV_A_DSN, "databases": ["test_db"]},
+                "envB": {"base_dsn": ENV_B_DSN, "databases": ["test_db"]},
+            }
+        )
+
+    assert reg.multi_env is True
+    assert amap["envA"]["reachable"] is True
+    assert amap["envA"]["dbs_ok"] == ["test_db"]
+    assert amap["envB"]["reachable"] is False
+    assert amap["envB"]["error"]  # a reason is recorded
+    # the reachable env registered a lazy pool; the unreachable env registered none
+    assert reg.get_names_for_env("envA") == ["test_db"]
+    assert reg.get_names_for_env("envB") == []
+    assert set(reg.get_environments()) == {"envA", "envB"}
+
+
+@pytest.mark.asyncio
+async def test_reconnect_recovers_unreachable_environment():
+    """reconnect_all re-probes: an env that was unreachable comes back with no restart."""
+    ctrl = {"down": True}
+    env_by_host = {"host-b": _make_env_pool(["test_db"], ctrl)}
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        amap = await reg.register_environments({"envB": {"base_dsn": ENV_B_DSN, "databases": ["test_db"]}})
+        assert amap["envB"]["reachable"] is False
+        assert reg.get_names_for_env("envB") == []
+
+        ctrl["down"] = False  # environment recovers (e.g. VPN/PG came back)
+        amap2 = await reg.reconnect_all()
+
+    assert amap2["envB"]["reachable"] is True
+    assert amap2["envB"]["dbs_ok"] == ["test_db"]
+    assert reg.get_names_for_env("envB") == ["test_db"]
+
+
+@pytest.mark.asyncio
+async def test_lazy_per_touch_recovery_without_reconnect():
+    """A registered env that drops mid-session fails one touch, then recovers on the next
+    touch — no reconnect() needed (lazy per-touch recovery)."""
+    ctrl = {"down": False}
+    env_by_host = {"host-a": _make_env_pool(["orders"], ctrl)}
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        await reg.register_environments({"envA": {"base_dsn": ENV_A_DSN, "databases": ["orders"]}})
+
+        ctrl["down"] = True  # env goes down after registration
+        with pytest.raises(DatabaseValidationError):
+            await reg.get_pool("orders", "envA")
+
+        ctrl["down"] = False  # env comes back; the very next touch succeeds
+        pool = await reg.get_pool("orders", "envA")
+
+    assert pool is env_by_host["host-a"]
+
+
+@pytest.mark.asyncio
+async def test_multi_env_requires_environment_argument():
+    """On the multi-environment path, get_pool without an environment is rejected."""
+    ctrl = {"down": False}
+    env_by_host = {"host-a": _make_env_pool(["test_db"], ctrl)}
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        await reg.register_environments({"envA": {"base_dsn": ENV_A_DSN, "databases": ["test_db"]}})
+        with pytest.raises(DatabaseValidationError) as exc_info:
+            await reg.get_pool("test_db", None)
+
+    assert "environment is required" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_availability_error_masks_password():
+    """A raw connection error carrying the password is masked before it reaches the
+    availability map (registry-level masking, independent of DbConnPool's own masking)."""
+    secret = "supersecret_pw"
+    dsn = f"postgresql://postgres:{secret}@host-b:5432/test_db"
+    pool = _make_env_pool(["test_db"], {"down": False})
+
+    async def _boom(*_args, **_kwargs):
+        # Raw driver errors often echo the DSN (with password) verbatim.
+        raise OSError(f"could not connect: {dsn}")
+
+    pool.pool_connect = AsyncMock(side_effect=_boom)
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory({"host-b": pool})):
+        reg = DbConnPoolRegistry()
+        amap = await reg.register_environments({"envB": {"base_dsn": dsn, "databases": ["test_db"]}})
+
+    err = amap["envB"]["error"]
+    assert err is not None
+    assert secret not in err
+    assert "****" in err  # password position redacted, not simply dropped
