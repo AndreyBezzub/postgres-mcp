@@ -9,6 +9,7 @@ import pytest
 import postgres_mcp.server as server
 from postgres_mcp.server import AccessMode
 from postgres_mcp.server import get_sql_driver
+from postgres_mcp.sql.db_conn_pool_registry import DEFAULT_ENV
 from postgres_mcp.sql.db_conn_pool_registry import DatabaseValidationError
 from postgres_mcp.sql.db_conn_pool_registry import DbConnPoolRegistry
 from postgres_mcp.sql.db_conn_pool_registry import ValidationResult
@@ -209,7 +210,8 @@ async def test_single_mode_default_get_sql_driver_resolves_sole_db():
     mock_pool = MagicMock()
     reg = DbConnPoolRegistry()
     reg._mode = "single"
-    reg._pools["test_db"] = MagicMock()
+    # Registry now keys pools by (environment, database); single/multi path uses DEFAULT_ENV.
+    reg._pools[(DEFAULT_ENV, "test_db")] = MagicMock()
     with (
         patch("postgres_mcp.server.db_registry", reg),
         patch.object(reg, "get_pool", AsyncMock(return_value=mock_pool)) as mock_get_pool,
@@ -219,7 +221,8 @@ async def test_single_mode_default_get_sql_driver_resolves_sole_db():
 
     assert isinstance(driver, SqlDriver)
     assert not isinstance(driver, SafeSqlDriver)
-    mock_get_pool.assert_awaited_once_with("test_db")
+    # get_sql_driver now forwards (database_name, environment) to the registry.
+    mock_get_pool.assert_awaited_once_with("test_db", None)
 
 
 @pytest.mark.asyncio
@@ -227,7 +230,7 @@ async def test_list_databases_return_shape():
     """The list_databases tool returns {"databases": [...], "mode": "single"|"multi"}."""
     reg = DbConnPoolRegistry()
     reg._mode = "single"
-    reg._pools["test_db"] = MagicMock()
+    reg._pools[(DEFAULT_ENV, "test_db")] = MagicMock()
     with patch("postgres_mcp.server.db_registry", reg):
         result = await server.list_databases()
 
