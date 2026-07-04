@@ -18,6 +18,8 @@ This function accepts parameters to control the behavior:
 - `sql` - The SQL query to explain (required)
 - `analyze` - When true, executes the query to get real statistics (default: false)
 - `hypothetical_indexes` - Optional list of indexes to simulate without creating them
+- `database_name` - Target database to run against (required in multi-database / multi-environment mode)
+- `environment` - Target environment to run against (required in multi-environment mode)
 
 ## Benefits
 

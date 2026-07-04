@@ -111,3 +111,34 @@ does not touch them):
 
 Any saved allow-lists / memories that reference the old per-environment server
 keys should be updated to the single-server namespace as well.
+
+## v0.4.0-hc.1 — Multi-database support (single PG host)
+
+Adds the ability for one server to expose several databases that live on the **same**
+PostgreSQL host and share **one** set of credentials. Classified as a **MINOR** bump
+(backward-compatible `feat:`): with no `--databases` flag the server behaves exactly as the
+`0.3.0` upstream baseline.
+
+### Added
+
+- **`--databases` flag.** A comma-separated list of database names on the host named by
+  `DATABASE_URI`. At startup the server connects once to the discovery database (the dbname in
+  `DATABASE_URI`, or `postgres` if none), validates each requested name against `pg_database`,
+  and registers only the valid ones. Names that do not exist or disallow connections are skipped
+  with a warning; if none are valid the server exits.
+- **Per-database connection pools (`DbConnPoolRegistry`).** One `DbConnPool` per validated
+  database, all sharing the host/port/credentials from `DATABASE_URI` with only the dbname
+  swapped. Pools open **lazily** — a database connects on the first tool call that targets it.
+- **`list_databases` tool.** Returns the registered database names and the current mode
+  (`single` or `multi`).
+
+### Changed
+
+- **Every SQL tool takes a `database_name` parameter**, selecting the target database per call.
+  When `--databases` is omitted the server runs in single-DB mode and `database_name` defaults
+  to the sole database, so existing single-database callers are unaffected.
+
+### Known limitation
+
+- `pg_stat_statements` is server-global: `get_top_queries` / `analyze_workload_indexes` report
+  queries across the entire server regardless of `database_name`.

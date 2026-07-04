@@ -26,6 +26,25 @@ vMAJOR.MINOR.PATCH-hc.N
 **Example:** upstream baseline `0.3.0` + a backward-compatible multi-database feature
 (`feat:`) → `v0.4.0-hc.1`.
 
+### Git tag vs. PEP 440 package version
+
+The `-hc.N` suffix is a **git-tag / SemVer** identifier only. It is **not** valid
+[PEP 440](https://peps.python.org/pep-0440/): Python pre-release segments are limited to
+`aN` / `bN` / `rcN`, so a package version of `X.Y.Z-hc.N` breaks `pip install`, `uv build`,
+and wheel construction.
+
+The **package version** in `pyproject.toml` therefore uses the PEP 440 **local-version**
+form `X.Y.Z+hc.N` (a normal release version plus a `+hc.N` local segment). It mirrors the
+tag's `X.Y.Z` and the same `N`:
+
+| Git tag (SemVer) | `pyproject.toml` `version` (PEP 440) |
+|------------------|--------------------------------------|
+| `v0.4.0-hc.1`    | `0.4.0+hc.1`                         |
+| `v1.0.0-hc.1`    | `1.0.0+hc.1`                         |
+
+Keep the two in sync: when you cut a tag `vX.Y.Z-hc.N`, set `pyproject.toml` `version` to
+`X.Y.Z+hc.N`.
+
 ## Branch / merge policy
 
 - Feature work happens on topic branches (e.g. `feat/...`) with granular Conventional Commits.
