@@ -43,7 +43,7 @@ class TestMultiDatabase:
         reg = DbConnPoolRegistry()
         try:
             await reg.validate_and_register(conn_str, ["orders", "catalog"])
-            catalog_pool = reg._pools[(DEFAULT_ENV, "catalog")]
+            catalog_pool = reg._pools[(DEFAULT_ENV, "catalog")]  # pyright: ignore[reportPrivateUsage]
             assert catalog_pool.is_valid is False  # not opened by registration
             await reg.get_pool("catalog")
             assert catalog_pool.is_valid is True  # opened on first access

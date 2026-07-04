@@ -99,7 +99,7 @@ class TestMultiEnvironment:
             # envA is fully queryable while envB is down.
             driver_a = SqlDriver(conn=await reg.get_pool("test_db", ENV_A))
             rows_a = await driver_a.execute_query("SELECT current_database() AS db")
-            assert rows_a[0].cells["db"] == "test_db"
+            assert rows_a[0].cells["db"] == "test_db"  # pyright: ignore[reportOptionalSubscript]
 
             # envB recovers; reconnect re-probes the unreachable env and restores it (no
             # restart; healthy envA is left untouched).
@@ -113,7 +113,7 @@ class TestMultiEnvironment:
             # And the recovered env is now actually usable.
             driver_b = SqlDriver(conn=await reg.get_pool(EXTRA_DB, ENV_B))
             rows_b = await driver_b.execute_query("SELECT current_database() AS db")
-            assert rows_b[0].cells["db"] == EXTRA_DB
+            assert rows_b[0].cells["db"] == EXTRA_DB  # pyright: ignore[reportOptionalSubscript]
         finally:
             try:
                 ct_b.reload()
@@ -160,14 +160,14 @@ class TestMultiEnvironment:
                     patch("postgres_mcp.server.current_access_mode", AccessMode.RESTRICTED),
                 ):
                     resp = await server.execute_sql(environment=env, database_name=db, sql=write_sql)
-                text = resp[0].text
+                text = resp[0].text  # pyright: ignore[reportAttributeAccessIssue]
                 assert text.startswith("Error"), f"write unexpectedly allowed on ({env}, {db}): {text}"
 
             # The write must not have taken effect on ANY (env, db) pool.
             for env, db in pairs:
                 driver = SqlDriver(conn=await reg.get_pool(db, env))
                 rows = await driver.execute_query("SELECT count(*) AS n FROM information_schema.tables WHERE table_name = 'guard_probe'")
-                assert rows[0].cells["n"] == 0, f"guard_probe leaked into ({env}, {db})"
+                assert rows[0].cells["n"] == 0, f"guard_probe leaked into ({env}, {db})"  # pyright: ignore[reportOptionalSubscript]
 
             # Control: the same DDL is accepted under UNRESTRICTED -> the refusal above
             # is the read-only access guard, not a malformed statement.
@@ -176,7 +176,7 @@ class TestMultiEnvironment:
                 patch("postgres_mcp.server.current_access_mode", AccessMode.UNRESTRICTED),
             ):
                 ok = await server.execute_sql(environment=ENV_A, database_name="test_db", sql=write_sql)
-            assert not ok[0].text.startswith("Error"), f"control write failed: {ok[0].text}"
+            assert not ok[0].text.startswith("Error"), f"control write failed: {ok[0].text}"  # pyright: ignore[reportAttributeAccessIssue]
             drop_driver = SqlDriver(conn=await reg.get_pool("test_db", ENV_A))
             await drop_driver.execute_query("DROP TABLE guard_probe")
         finally:
