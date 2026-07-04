@@ -6,6 +6,7 @@ import pytest
 
 import postgres_mcp.server as server
 from postgres_mcp.server import AccessMode
+from postgres_mcp.sql.db_conn_pool_registry import DEFAULT_ENV
 from postgres_mcp.sql.db_conn_pool_registry import DbConnPoolRegistry
 from postgres_mcp.sql.sql_driver import SqlDriver
 
@@ -42,7 +43,7 @@ class TestMultiDatabase:
         reg = DbConnPoolRegistry()
         try:
             await reg.validate_and_register(conn_str, ["orders", "catalog"])
-            catalog_pool = reg._pools["catalog"]
+            catalog_pool = reg._pools[(DEFAULT_ENV, "catalog")]  # pyright: ignore[reportPrivateUsage]
             assert catalog_pool.is_valid is False  # not opened by registration
             await reg.get_pool("catalog")
             assert catalog_pool.is_valid is True  # opened on first access
@@ -69,7 +70,9 @@ class TestMultiDatabase:
                 patch("postgres_mcp.server.db_registry", reg),
                 patch("postgres_mcp.server.current_access_mode", AccessMode.UNRESTRICTED),
             ):
-                response = await server.list_schemas(database_name="nonexistent")
+                # environment=None mirrors how FastMCP resolves the Field(None) default
+                # (a direct call would otherwise leave it as a raw FieldInfo object).
+                response = await server.list_schemas(environment=None, database_name="nonexistent")
             text = response[0].text
             assert "Error" in text
             assert "Unknown database 'nonexistent'" in text
@@ -86,7 +89,9 @@ class TestMultiDatabase:
                 patch("postgres_mcp.server.db_registry", reg),
                 patch("postgres_mcp.server.current_access_mode", AccessMode.UNRESTRICTED),
             ):
-                response = await server.list_schemas(database_name=None)
+                # environment=None mirrors how FastMCP resolves the Field(None) default
+                # (a direct call would otherwise leave it as a raw FieldInfo object).
+                response = await server.list_schemas(environment=None, database_name=None)
             text = response[0].text
             assert "Error" in text
             assert "database_name is required" in text

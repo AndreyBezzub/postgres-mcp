@@ -33,6 +33,7 @@ from .sql import DbConnPoolRegistry
 from .sql import SafeSqlDriver
 from .sql import SqlDriver
 from .sql import check_hypopg_installation_status
+from .sql import obfuscate_password
 from .top_queries import TopQueriesCalc
 
 # Initialize FastMCP with default settings
@@ -42,6 +43,7 @@ mcp = FastMCP("postgres-mcp")
 PG_STAT_STATEMENTS = "pg_stat_statements"
 HYPOPG_EXTENSION = "hypopg"
 DATABASE_NAME_PARAM_DESC = "Target database name. Call list_databases for available names."
+ENVIRONMENT_PARAM_DESC = "Target environment. Required in multi-environment mode; call list_databases for available environments."
 PG_STAT_STATEMENTS_SCOPE_NOTE = (
     f"\n\nNote: {PG_STAT_STATEMENTS} has server-global scope; results include queries from all "
     "databases on this PG server, not just the selected database_name."
@@ -65,11 +67,16 @@ current_access_mode = AccessMode.UNRESTRICTED
 shutdown_in_progress = False
 
 
-async def get_sql_driver(database_name: Optional[str]) -> Union[SqlDriver, SafeSqlDriver]:
-    """Get the SQL driver for a specific database, honoring the current access mode."""
-    if database_name is None and db_registry.mode == "single":
+async def get_sql_driver(database_name: Optional[str], environment: Optional[str] = None) -> Union[SqlDriver, SafeSqlDriver]:
+    """Get the SQL driver for a specific (environment, database), honoring the current access mode.
+
+    On the multi-environment path both ``environment`` and ``database_name`` are required
+    (enforced by the registry). On the single/multi path ``environment`` is unused and a
+    sole single-mode database is resolved by default for backward compatibility.
+    """
+    if not db_registry.multi_env and db_registry.mode == "single" and database_name is None:
         database_name = db_registry.get_names()[0]  # backward-compatible default
-    pool = await db_registry.get_pool(database_name)  # raises DatabaseValidationError if None/unknown
+    pool = await db_registry.get_pool(database_name, environment)  # raises DatabaseValidationError if None/unknown
     base_driver = SqlDriver(conn=pool)
     if current_access_mode == AccessMode.RESTRICTED:
         return SafeSqlDriver(sql_driver=base_driver, timeout=30)
@@ -94,11 +101,12 @@ def format_error_response(error: str) -> ResponseType:
     ),
 )
 async def list_schemas(
+    environment: Optional[str] = Field(None, description=ENVIRONMENT_PARAM_DESC),
     database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
 ) -> ResponseType:
     """List all schemas in the database."""
     try:
-        sql_driver = await get_sql_driver(database_name)
+        sql_driver = await get_sql_driver(database_name, environment)
         rows = await sql_driver.execute_query(
             """
             SELECT
@@ -128,13 +136,14 @@ async def list_schemas(
     ),
 )
 async def list_objects(
+    environment: Optional[str] = Field(None, description=ENVIRONMENT_PARAM_DESC),
     database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
     schema_name: str = Field(description="Schema name"),
     object_type: str = Field(description="Object type: 'table', 'view', 'sequence', or 'extension'", default="table"),
 ) -> ResponseType:
     """List objects of a given type in a schema."""
     try:
-        sql_driver = await get_sql_driver(database_name)
+        sql_driver = await get_sql_driver(database_name, environment)
 
         if object_type in ("table", "view"):
             table_type = "BASE TABLE" if object_type == "table" else "VIEW"
@@ -203,6 +212,7 @@ async def list_objects(
     ),
 )
 async def get_object_details(
+    environment: Optional[str] = Field(None, description=ENVIRONMENT_PARAM_DESC),
     database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
     schema_name: str = Field(description="Schema name"),
     object_name: str = Field(description="Object name"),
@@ -210,7 +220,7 @@ async def get_object_details(
 ) -> ResponseType:
     """Get detailed information about a database object."""
     try:
-        sql_driver = await get_sql_driver(database_name)
+        sql_driver = await get_sql_driver(database_name, environment)
 
         if object_type in ("table", "view"):
             # Get columns
@@ -343,6 +353,7 @@ async def get_object_details(
     ),
 )
 async def explain_query(
+    environment: Optional[str] = Field(None, description=ENVIRONMENT_PARAM_DESC),
     database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
     sql: str = Field(description="SQL query to explain"),
     analyze: bool = Field(
@@ -373,7 +384,7 @@ If there is no hypothetical index, you can pass an empty list.""",
         hypothetical_indexes: Optional list of indexes to simulate
     """
     try:
-        sql_driver = await get_sql_driver(database_name)
+        sql_driver = await get_sql_driver(database_name, environment)
         explain_tool = ExplainPlanTool(sql_driver=sql_driver)
         result: ExplainPlanArtifact | ErrorResult | None = None
 
@@ -423,12 +434,13 @@ If there is no hypothetical index, you can pass an empty list.""",
 
 # Query function declaration without the decorator - we'll add it dynamically based on access mode
 async def execute_sql(
+    environment: Optional[str] = Field(None, description=ENVIRONMENT_PARAM_DESC),
     database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
     sql: str = Field(description="SQL to run", default="all"),
 ) -> ResponseType:
     """Executes a SQL query against the database."""
     try:
-        sql_driver = await get_sql_driver(database_name)
+        sql_driver = await get_sql_driver(database_name, environment)
         rows = await sql_driver.execute_query(sql)  # type: ignore
         if rows is None:
             return format_text_response("No results")
@@ -446,15 +458,18 @@ async def execute_sql(
     ),
 )
 @validate_call
-# database_name placed last due to @validate_call's required-before-optional constraint
+# environment and database_name placed last (both optional-with-default) due to
+# @validate_call's required-before-optional constraint; requiredness on the
+# multi-environment path is enforced at runtime by the registry.
 async def analyze_workload_indexes(
     max_index_size_mb: int = Field(description="Max index size in MB", default=10000),
     method: Literal["dta", "llm"] = Field(description="Method to use for analysis", default="dta"),
+    environment: Optional[str] = Field(None, description=ENVIRONMENT_PARAM_DESC),
     database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
 ) -> ResponseType:
     """Analyze frequently executed queries in the database and recommend optimal indexes."""
     try:
-        sql_driver = await get_sql_driver(database_name)
+        sql_driver = await get_sql_driver(database_name, environment)
         if method == "dta":
             index_tuning = DatabaseTuningAdvisor(sql_driver)
         else:
@@ -475,11 +490,14 @@ async def analyze_workload_indexes(
     ),
 )
 @validate_call
-# database_name placed last due to @validate_call's required-before-optional constraint
+# environment and database_name placed last (both optional-with-default) due to
+# @validate_call's required-before-optional constraint; requiredness on the
+# multi-environment path is enforced at runtime by the registry.
 async def analyze_query_indexes(
     queries: list[str] = Field(description="List of Query strings to analyze"),
     max_index_size_mb: int = Field(description="Max index size in MB", default=10000),
     method: Literal["dta", "llm"] = Field(description="Method to use for analysis", default="dta"),
+    environment: Optional[str] = Field(None, description=ENVIRONMENT_PARAM_DESC),
     database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
 ) -> ResponseType:
     """Analyze a list of SQL queries and recommend optimal indexes."""
@@ -489,7 +507,7 @@ async def analyze_query_indexes(
         return format_error_response(f"Please provide a list of up to {MAX_NUM_INDEX_TUNING_QUERIES} queries to analyze.")
 
     try:
-        sql_driver = await get_sql_driver(database_name)
+        sql_driver = await get_sql_driver(database_name, environment)
         if method == "dta":
             index_tuning = DatabaseTuningAdvisor(sql_driver)
         else:
@@ -519,6 +537,7 @@ async def analyze_query_indexes(
     ),
 )
 async def analyze_db_health(
+    environment: Optional[str] = Field(None, description=ENVIRONMENT_PARAM_DESC),
     database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
     health_type: str = Field(
         description=f"Optional. Valid values are: {', '.join(sorted([t.value for t in HealthType]))}.",
@@ -532,7 +551,7 @@ async def analyze_db_health(
                     Valid values: index, connection, vacuum, sequence, replication, buffer, constraint, all
     """
     try:
-        sql_driver = await get_sql_driver(database_name)
+        sql_driver = await get_sql_driver(database_name, environment)
         health_tool = DatabaseHealthTool(sql_driver)
         result = await health_tool.health(health_type=health_type)
         return format_text_response(result)
@@ -550,6 +569,7 @@ async def analyze_db_health(
     ),
 )
 async def get_top_queries(
+    environment: Optional[str] = Field(None, description=ENVIRONMENT_PARAM_DESC),
     database_name: Optional[str] = Field(None, description=DATABASE_NAME_PARAM_DESC),
     sort_by: str = Field(
         description="Ranking criteria: 'total_time' for total execution time or 'mean_time' for mean execution time per call, or 'resources' "
@@ -559,7 +579,7 @@ async def get_top_queries(
     limit: int = Field(description="Number of queries to return when ranking based on mean_time or total_time", default=10),
 ) -> ResponseType:
     try:
-        sql_driver = await get_sql_driver(database_name)
+        sql_driver = await get_sql_driver(database_name, environment)
         top_queries_tool = TopQueriesCalc(sql_driver=sql_driver)
 
         if sort_by == "resources":
@@ -584,12 +604,50 @@ async def get_top_queries(
     ),
 )
 async def list_databases() -> dict[str, Any]:
-    """Return the registered database names and the server mode."""
+    """Return the availability view of the databases this server can access.
+
+    On the multi-environment path this is a global (no-argument) status surface:
+    ``{"mode": "multi-env", "environments": {env: {reachable, dbs_ok, dbs_missing,
+    error}}}``. On the single/multi path the historical shape is preserved:
+    ``{"databases": [...], "mode": "single"|"multi"}``. No side effects.
+    """
+    if db_registry.multi_env:
+        return {"mode": "multi-env", "environments": db_registry.availability_map()}
     return {"databases": db_registry.get_names(), "mode": db_registry.mode}
 
 
-def _inject_database_name_description(desc: str) -> None:
-    """Patch the database_name parameter description on every registered tool.
+@mcp.tool(
+    description="Re-probe unreachable environments and rebuild their availability, leaving healthy "
+    "environments (and their in-flight queries) untouched. Use this to recover after an environment "
+    "was unreachable (e.g. VPN/PG came back) without restarting the server. Pass 'environment' to force "
+    "a re-probe of one specific environment regardless of its current state.",
+    annotations=ToolAnnotations(
+        title="Reconnect",
+        readOnlyHint=False,
+    ),
+)
+async def reconnect(
+    environment: Optional[str] = Field(
+        None,
+        description="Optional: re-probe only this environment. Omit to re-probe every currently-unreachable environment.",
+    ),
+) -> dict[str, Any]:
+    """Side-effecting: re-probe unreachable (or one specified) environment(s); return the refreshed map."""
+    if not db_registry.multi_env:
+        return {
+            "mode": db_registry.mode,
+            "error": "reconnect is only available in multi-environment mode.",
+        }
+    try:
+        availability = await db_registry.reconnect_all(environment)
+        return {"mode": "multi-env", "environments": availability}
+    except Exception as e:
+        logger.error(f"Error during reconnect: {obfuscate_password(str(e))}")
+        return {"mode": "multi-env", "error": obfuscate_password(str(e))}
+
+
+def _inject_param_description(param_name: str, desc: str) -> None:
+    """Patch a parameter's description on every registered tool that exposes it.
 
     Mutates tool.parameters in place; FastMCP reads this dict by reference when
     serving protocol-level list_tools, so the change is visible immediately.
@@ -600,10 +658,63 @@ def _inject_database_name_description(desc: str) -> None:
     try:
         for tool in mcp._tool_manager.list_tools():  # pyright: ignore[reportPrivateUsage]
             props = tool.parameters.get("properties", {})
-            if "database_name" in props:
-                props["database_name"]["description"] = desc
+            if param_name in props:
+                props[param_name]["description"] = desc
     except Exception as e:
-        logger.warning(f"Could not inject database_name descriptions: {e}")
+        logger.warning(f"Could not inject {param_name} descriptions: {e}")
+
+
+def _inject_database_name_description(desc: str) -> None:
+    """Backward-compatible wrapper: patch the database_name description on every tool."""
+    _inject_param_description("database_name", desc)
+
+
+def _register_execute_sql_tool() -> None:
+    """Register execute_sql with a description/annotations appropriate to the access mode.
+
+    execute_sql has no @mcp.tool decorator; it is added dynamically here so its
+    read-only vs destructive presentation follows current_access_mode. Shared by
+    both main() (single/multi path) and run_multi() (multi-environment path).
+    """
+    if current_access_mode == AccessMode.UNRESTRICTED:
+        mcp.add_tool(
+            execute_sql,
+            description="Execute any SQL query",
+            annotations=ToolAnnotations(
+                title="Execute SQL",
+                destructiveHint=True,
+            ),
+        )
+    else:
+        mcp.add_tool(
+            execute_sql,
+            description="Execute a read-only SQL query",
+            annotations=ToolAnnotations(
+                title="Execute SQL (Read-Only)",
+                readOnlyHint=True,
+            ),
+        )
+
+
+def _apply_env_allowlist(connections: dict[str, Any]) -> dict[str, Any]:
+    """Filter ``connections`` by the ``LMHC_DB_ENVS`` allowlist (multi-environment path).
+
+    Unset/blank -> all provisioned environments active. Set -> keep only listed names;
+    unknown names are dropped with a WARNING (never a crash). Filtering to an empty set
+    is honored (the server still starts, with zero active environments).
+    """
+    raw = os.environ.get("LMHC_DB_ENVS")
+    if not raw or not raw.strip():
+        return dict(connections)
+    requested = list(dict.fromkeys(e.strip() for e in raw.split(",") if e.strip()))
+    provisioned = set(connections)
+    for name in requested:
+        if name not in provisioned:
+            logger.warning("LMHC_DB_ENVS: ignoring unknown environment '%s' (not provisioned)", name)
+    filtered = {name: connections[name] for name in requested if name in provisioned}
+    if not filtered:
+        logger.warning("LMHC_DB_ENVS filtered out every environment; the server will start with zero active environments")
+    return filtered
 
 
 async def main():
@@ -665,24 +776,7 @@ async def main():
     database_names = list(dict.fromkeys(d.strip() for d in args.databases.split(",") if d.strip())) if args.databases else None
 
     # Add the query tool with a description and annotations appropriate to the access mode
-    if current_access_mode == AccessMode.UNRESTRICTED:
-        mcp.add_tool(
-            execute_sql,
-            description="Execute any SQL query",
-            annotations=ToolAnnotations(
-                title="Execute SQL",
-                destructiveHint=True,
-            ),
-        )
-    else:
-        mcp.add_tool(
-            execute_sql,
-            description="Execute a read-only SQL query",
-            annotations=ToolAnnotations(
-                title="Execute SQL (Read-Only)",
-                readOnlyHint=True,
-            ),
-        )
+    _register_execute_sql_tool()
 
     logger.info(f"Starting PostgreSQL MCP Server in {current_access_mode.upper()} mode")
 
@@ -743,6 +837,83 @@ async def main():
     elif args.transport == "streamable-http":
         mcp.settings.host = args.streamable_http_host
         mcp.settings.port = args.streamable_http_port
+        await mcp.run_streamable_http_async()
+
+
+async def run_multi(
+    connections: dict[str, Any],
+    access_mode: str = AccessMode.RESTRICTED.value,
+    transport: str = "stdio",
+    sse_host: str = "localhost",
+    sse_port: int = 8000,
+    streamable_http_host: str = "localhost",
+    streamable_http_port: int = 8000,
+) -> None:
+    """Multi-environment entry point (credential- and replica-agnostic).
+
+    ``connections`` maps ``environment -> {"base_dsn": str, "databases": [str, ...]}``,
+    already resolved by the caller (the plugin). ``prod-replica`` is simply another
+    environment key. This path is NON-FATAL: every environment is probed in parallel
+    with a short timeout and unreachable ones are recorded in the availability map —
+    the server ALWAYS starts and NEVER calls sys.exit on a per-environment failure.
+    """
+    global current_access_mode
+    current_access_mode = AccessMode(access_mode)
+
+    # Register execute_sql (access-mode dependent) exactly as the single/multi path does.
+    _register_execute_sql_tool()
+
+    logger.info(f"Starting PostgreSQL MCP Server (multi-environment) in {current_access_mode.upper()} mode")
+
+    # Apply the LMHC_DB_ENVS allowlist over the provisioned environments.
+    active = _apply_env_allowlist(connections)
+
+    # Non-fatal, parallel per-environment probing -> availability map.
+    global db_registry
+    availability = await db_registry.register_environments(active)
+
+    for env, info in availability.items():
+        if info["reachable"]:
+            msg = f"Environment '{env}' reachable: {len(info['dbs_ok'])} database(s) available"
+            if info["dbs_missing"]:
+                msg += f"; {len(info['dbs_missing'])} not found: {', '.join(info['dbs_missing'])}"
+            logger.info(msg)
+        else:
+            logger.warning("Environment '%s' UNAVAILABLE (server still starting): %s", env, info["error"])
+    logger.info(
+        "Active environments: %s",
+        ", ".join(db_registry.get_environments()) or "(none)",
+    )
+
+    # Dynamic parameter-description injection for the multi-environment tool surface.
+    envs = db_registry.get_environments()
+    env_desc = f"Target environment. Available: {', '.join(envs) or '(none)'}. Required; call list_databases for the current list."
+    globals()["ENVIRONMENT_PARAM_DESC"] = env_desc
+    _inject_param_description("environment", env_desc)
+    db_desc = "Target database within the selected environment. Required; call list_databases for available names."
+    globals()["DATABASE_NAME_PARAM_DESC"] = db_desc
+    _inject_param_description("database_name", db_desc)
+
+    # Set up proper shutdown handling (mirrors main()).
+    try:
+        loop = asyncio.get_running_loop()
+        signals = (signal.SIGTERM, signal.SIGINT)
+        for s in signals:
+            loop.add_signal_handler(s, lambda s=s: asyncio.create_task(shutdown(s)))
+    except NotImplementedError:
+        # Windows doesn't support signals properly
+        logger.warning("Signal handling not supported on Windows")
+
+    # Run the server with the selected transport (always async).
+    if transport == "stdio":
+        await mcp.run_stdio_async()
+    elif transport == "sse":
+        mcp.settings.host = sse_host
+        mcp.settings.port = sse_port
+        await mcp.run_sse_async()
+    elif transport == "streamable-http":
+        mcp.settings.host = streamable_http_host
+        mcp.settings.port = streamable_http_port
         await mcp.run_streamable_http_async()
 
 

@@ -3,12 +3,14 @@ import sys
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 import pytest
 
 import postgres_mcp.server as server
 from postgres_mcp.server import AccessMode
 from postgres_mcp.server import get_sql_driver
+from postgres_mcp.sql.db_conn_pool_registry import DEFAULT_ENV
 from postgres_mcp.sql.db_conn_pool_registry import DatabaseValidationError
 from postgres_mcp.sql.db_conn_pool_registry import DbConnPoolRegistry
 from postgres_mcp.sql.db_conn_pool_registry import ValidationResult
@@ -55,24 +57,24 @@ def _make_pool_factory(discovery_returns):
     created = []
 
     def factory(url):
-        if not factory.calls:
-            factory.calls.append(url)
+        if not factory.calls:  # pyright: ignore[reportFunctionMemberAccess]
+            factory.calls.append(url)  # pyright: ignore[reportFunctionMemberAccess]
             return discovery_inst
-        factory.calls.append(url)
+        factory.calls.append(url)  # pyright: ignore[reportFunctionMemberAccess]
         m = MagicMock()
         m.pool_connect = AsyncMock()
         m.close = AsyncMock()
         created.append(m)
         return m
 
-    factory.calls = []
+    factory.calls = []  # pyright: ignore[reportFunctionMemberAccess]
     return factory, discovery_inst, created
 
 
 def test_build_db_url_swaps_dbname_keeps_creds_and_host():
     reg = DbConnPoolRegistry()
-    reg._base_url = BASE_URL
-    assert reg._build_db_url("orders") == "postgresql://postgres:secret@localhost:5432/orders"
+    reg._base_url = BASE_URL  # pyright: ignore[reportPrivateUsage]
+    assert reg._build_db_url("orders") == "postgresql://postgres:secret@localhost:5432/orders"  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize(
@@ -85,7 +87,7 @@ def test_build_db_url_swaps_dbname_keeps_creds_and_host():
 )
 def test_discovery_dbname(url, expected):
     reg = DbConnPoolRegistry()
-    assert reg._discovery_dbname(url) == expected
+    assert reg._discovery_dbname(url) == expected  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio
@@ -208,8 +210,9 @@ async def test_single_mode_default_get_sql_driver_resolves_sole_db():
     """get_sql_driver(None) resolves to the only registered DB in single mode."""
     mock_pool = MagicMock()
     reg = DbConnPoolRegistry()
-    reg._mode = "single"
-    reg._pools["test_db"] = MagicMock()
+    reg._mode = "single"  # pyright: ignore[reportPrivateUsage]
+    # Registry now keys pools by (environment, database); single/multi path uses DEFAULT_ENV.
+    reg._pools[(DEFAULT_ENV, "test_db")] = MagicMock()  # pyright: ignore[reportPrivateUsage]
     with (
         patch("postgres_mcp.server.db_registry", reg),
         patch.object(reg, "get_pool", AsyncMock(return_value=mock_pool)) as mock_get_pool,
@@ -219,15 +222,16 @@ async def test_single_mode_default_get_sql_driver_resolves_sole_db():
 
     assert isinstance(driver, SqlDriver)
     assert not isinstance(driver, SafeSqlDriver)
-    mock_get_pool.assert_awaited_once_with("test_db")
+    # get_sql_driver now forwards (database_name, environment) to the registry.
+    mock_get_pool.assert_awaited_once_with("test_db", None)
 
 
 @pytest.mark.asyncio
 async def test_list_databases_return_shape():
     """The list_databases tool returns {"databases": [...], "mode": "single"|"multi"}."""
     reg = DbConnPoolRegistry()
-    reg._mode = "single"
-    reg._pools["test_db"] = MagicMock()
+    reg._mode = "single"  # pyright: ignore[reportPrivateUsage]
+    reg._pools[(DEFAULT_ENV, "test_db")] = MagicMock()  # pyright: ignore[reportPrivateUsage]
     with patch("postgres_mcp.server.db_registry", reg):
         result = await server.list_databases()
 
@@ -333,3 +337,329 @@ async def test_main_dedupes_databases(monkeypatch):
         await server.main()
 
     assert captured["names"] == ["orders", "catalog"]
+
+
+# --------------------------------------------------------------------------- #
+# Multi-environment path (server.run_multi / register_environments) — unit tests
+#
+# These extend the single/multi mock pattern above to *multiple* environments,
+# routing DbConnPool construction to a per-environment mock by URL host. A shared
+# "controller" dict lets a test flip an environment unreachable -> reachable to
+# exercise non-fatal startup, reconnect recovery, and lazy per-touch recovery
+# with no real network / Docker.
+# --------------------------------------------------------------------------- #
+ENV_A_DSN = "postgresql://postgres:secret@host-a:5432/test_db"
+ENV_B_DSN = "postgresql://postgres:secret@host-b:5432/test_db"
+
+
+def _make_env_pool(dbs, controller):
+    """Return a MagicMock DbConnPool standing in for one environment.
+
+    ``controller`` is a dict with a ``"down"`` flag. When truthy, ``pool_connect``
+    raises (an unreachable environment); otherwise it returns a discovery-capable
+    raw pool whose pg_database query yields ``dbs``. The SAME instance backs both
+    the environment's discovery probe and its lazy per-database pools (the registry
+    creates a DbConnPool per (env, db); routing by host returns this one mock).
+    """
+    raw = _make_discovery_pool(dbs)
+    inst = MagicMock()
+    inst.close = AsyncMock()
+
+    async def _connect(*_args, **_kwargs):
+        if controller.get("down"):
+            raise OSError("connection refused")
+        return raw
+
+    inst.pool_connect = AsyncMock(side_effect=_connect)
+    return inst
+
+
+def _make_multi_env_factory(env_by_host):
+    """DbConnPool side_effect routing each URL to its environment mock by host."""
+
+    def factory(url):
+        return env_by_host[urlparse(url).hostname]
+
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_register_environments_non_fatal_records_unreachable():
+    """One unreachable environment is recorded (reachable=False) and never aborts startup."""
+    ctrl_a = {"down": False}
+    ctrl_b = {"down": True}
+    env_by_host = {
+        "host-a": _make_env_pool(["test_db"], ctrl_a),
+        "host-b": _make_env_pool(["test_db"], ctrl_b),
+    }
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        amap = await reg.register_environments(
+            {
+                "envA": {"base_dsn": ENV_A_DSN, "databases": ["test_db"]},
+                "envB": {"base_dsn": ENV_B_DSN, "databases": ["test_db"]},
+            }
+        )
+
+    assert reg.multi_env is True
+    assert amap["envA"]["reachable"] is True
+    assert amap["envA"]["dbs_ok"] == ["test_db"]
+    assert amap["envB"]["reachable"] is False
+    assert amap["envB"]["error"]  # a reason is recorded
+    # the reachable env registered a lazy pool; the unreachable env registered none
+    assert reg.get_names_for_env("envA") == ["test_db"]
+    assert reg.get_names_for_env("envB") == []
+    assert set(reg.get_environments()) == {"envA", "envB"}
+
+
+@pytest.mark.asyncio
+async def test_reconnect_recovers_unreachable_environment():
+    """reconnect_all re-probes: an env that was unreachable comes back with no restart."""
+    ctrl = {"down": True}
+    env_by_host = {"host-b": _make_env_pool(["test_db"], ctrl)}
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        amap = await reg.register_environments({"envB": {"base_dsn": ENV_B_DSN, "databases": ["test_db"]}})
+        assert amap["envB"]["reachable"] is False
+        assert reg.get_names_for_env("envB") == []
+
+        ctrl["down"] = False  # environment recovers (e.g. VPN/PG came back)
+        amap2 = await reg.reconnect_all()
+
+    assert amap2["envB"]["reachable"] is True
+    assert amap2["envB"]["dbs_ok"] == ["test_db"]
+    assert reg.get_names_for_env("envB") == ["test_db"]
+
+
+@pytest.mark.asyncio
+async def test_lazy_per_touch_recovery_without_reconnect():
+    """A registered env that drops mid-session fails one touch, then recovers on the next
+    touch — no reconnect() needed (lazy per-touch recovery)."""
+    ctrl = {"down": False}
+    env_by_host = {"host-a": _make_env_pool(["orders"], ctrl)}
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        await reg.register_environments({"envA": {"base_dsn": ENV_A_DSN, "databases": ["orders"]}})
+
+        ctrl["down"] = True  # env goes down after registration
+        with pytest.raises(DatabaseValidationError):
+            await reg.get_pool("orders", "envA")
+
+        ctrl["down"] = False  # env comes back; the very next touch succeeds
+        pool = await reg.get_pool("orders", "envA")
+
+    assert pool is env_by_host["host-a"]
+
+
+@pytest.mark.asyncio
+async def test_multi_env_requires_environment_argument():
+    """On the multi-environment path, get_pool without an environment is rejected."""
+    ctrl = {"down": False}
+    env_by_host = {"host-a": _make_env_pool(["test_db"], ctrl)}
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        await reg.register_environments({"envA": {"base_dsn": ENV_A_DSN, "databases": ["test_db"]}})
+        with pytest.raises(DatabaseValidationError) as exc_info:
+            await reg.get_pool("test_db", None)
+
+    assert "environment is required" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_availability_error_masks_password():
+    """A raw connection error carrying the password is masked before it reaches the
+    availability map (registry-level masking, independent of DbConnPool's own masking)."""
+    secret = "supersecret_pw"
+    dsn = f"postgresql://postgres:{secret}@host-b:5432/test_db"
+    pool = _make_env_pool(["test_db"], {"down": False})
+
+    async def _boom(*_args, **_kwargs):
+        # Raw driver errors often echo the DSN (with password) verbatim.
+        raise OSError(f"could not connect: {dsn}")
+
+    pool.pool_connect = AsyncMock(side_effect=_boom)
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory({"host-b": pool})):
+        reg = DbConnPoolRegistry()
+        amap = await reg.register_environments({"envB": {"base_dsn": dsn, "databases": ["test_db"]}})
+
+    err = amap["envB"]["error"]
+    assert err is not None
+    assert secret not in err
+    assert "****" in err  # password position redacted, not simply dropped
+
+
+# --------------------------------------------------------------------------- #
+# F1 — non-fatal startup must survive a MALFORMED/incomplete per-environment spec
+# (missing or None base_dsn), not just a network-level failure. One bad entry must
+# never abort registration for the other environments.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_register_environments_non_fatal_on_missing_or_none_base_dsn():
+    """A spec missing base_dsn (KeyError) or with base_dsn=None (urlparse TypeError) is
+    recorded unreachable; register_environments never raises and the good env still registers."""
+    ctrl = {"down": False}
+    env_by_host = {"host-a": _make_env_pool(["test_db"], ctrl)}
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        amap = await reg.register_environments(
+            {
+                "good": {"base_dsn": ENV_A_DSN, "databases": ["test_db"]},
+                "missing": {"databases": ["test_db"]},  # no base_dsn key -> KeyError trigger
+                "none": {"base_dsn": None, "databases": ["x"]},  # None -> urlparse TypeError trigger
+            }
+        )
+
+    # The good environment came up normally.
+    assert amap["good"]["reachable"] is True
+    assert amap["good"]["dbs_ok"] == ["test_db"]
+    # Both malformed specs are recorded unreachable with a reason — never crashed startup.
+    assert amap["missing"]["reachable"] is False
+    assert "base_dsn" in (amap["missing"]["error"] or "")
+    assert amap["none"]["reachable"] is False
+    assert "base_dsn" in (amap["none"]["error"] or "")
+    # No pools registered for the malformed envs; all three envs are known.
+    assert reg.get_names_for_env("missing") == []
+    assert reg.get_names_for_env("none") == []
+    assert set(reg.get_environments()) == {"good", "missing", "none"}
+
+
+# --------------------------------------------------------------------------- #
+# F2 — reconnect must NOT rebuild pools for healthy environments (no blast radius),
+# and must support scoping to a single environment.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_reconnect_only_reprobes_unreachable_leaves_healthy_untouched():
+    """reconnect_all() re-probes only currently-unreachable envs; a healthy env's pool is
+    never closed or rebuilt, so concurrent queries against it cannot be disrupted."""
+    ctrl_a = {"down": False}  # healthy throughout
+    ctrl_b = {"down": True}  # unreachable at startup
+    pool_a = _make_env_pool(["orders"], ctrl_a)
+    pool_b = _make_env_pool(["catalog"], ctrl_b)
+    env_by_host = {"host-a": pool_a, "host-b": pool_b}
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        await reg.register_environments(
+            {
+                "envA": {"base_dsn": ENV_A_DSN, "databases": ["orders"]},
+                "envB": {"base_dsn": ENV_B_DSN, "databases": ["catalog"]},
+            }
+        )
+        # envA healthy with an opened lazy pool; envB unreachable.
+        await reg.get_pool("orders", "envA")
+        pool_a.close.reset_mock()  # ignore the discovery-pool close from registration
+
+        ctrl_b["down"] = False  # envB recovers
+        amap = await reg.reconnect_all()
+
+    # envB was re-probed and recovered.
+    assert amap["envB"]["reachable"] is True
+    assert reg.get_names_for_env("envB") == ["catalog"]
+    # Healthy envA was left completely untouched: its pool was NOT closed by the reconnect.
+    pool_a.close.assert_not_awaited()
+    assert amap["envA"]["reachable"] is True
+    assert reg.get_names_for_env("envA") == ["orders"]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_scoped_to_named_environment():
+    """reconnect_all(environment=X) re-probes only X (even if healthy) and leaves every other
+    environment's pool untouched."""
+    ctrl_a = {"down": False}
+    ctrl_b = {"down": False}
+    pool_a = _make_env_pool(["orders"], ctrl_a)
+    pool_b = _make_env_pool(["catalog"], ctrl_b)
+    env_by_host = {"host-a": pool_a, "host-b": pool_b}
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        await reg.register_environments(
+            {
+                "envA": {"base_dsn": ENV_A_DSN, "databases": ["orders"]},
+                "envB": {"base_dsn": ENV_B_DSN, "databases": ["catalog"]},
+            }
+        )
+        await reg.get_pool("orders", "envA")  # open envA's pool
+        pool_a.close.reset_mock()
+        pool_b.close.reset_mock()
+
+        amap = await reg.reconnect_all(environment="envA")
+
+    # envA was force-re-probed (its old pool closed), envB (not named) untouched.
+    pool_a.close.assert_awaited()
+    pool_b.close.assert_not_awaited()
+    assert amap["envA"]["reachable"] is True
+    assert reg.get_names_for_env("envA") == ["orders"]
+    assert amap["envB"]["reachable"] is True
+
+
+# --------------------------------------------------------------------------- #
+# F3 — the run_multi ENTRY POINT itself must start the server even when one env's
+# spec is malformed (the flagship non-fatal guarantee, exercised end-to-end — not
+# just at the register_environments level).
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_run_multi_starts_despite_malformed_env_spec(monkeypatch):
+    """server.run_multi() reaches the transport-run stage without raising when one
+    environment's spec is malformed; the good env is reachable, the bad one recorded."""
+    monkeypatch.delenv("LMHC_DB_ENVS", raising=False)
+    ctrl = {"down": False}
+    env_by_host = {"host-a": _make_env_pool(["test_db"], ctrl)}
+    fresh = DbConnPoolRegistry()
+    connections = {
+        "envA": {"base_dsn": ENV_A_DSN, "databases": ["test_db"]},
+        "envBROKEN": {"databases": ["test_db"]},  # missing base_dsn -> must NOT crash startup
+    }
+    with (
+        patch("postgres_mcp.server.db_registry", fresh),
+        patch("postgres_mcp.server.current_access_mode", AccessMode.UNRESTRICTED),
+        patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)),
+        patch.object(server.mcp, "add_tool"),
+        patch.object(server.mcp, "run_stdio_async", AsyncMock()) as run_stdio,
+    ):
+        await server.run_multi(connections=connections, access_mode="restricted", transport="stdio")
+
+    # Reached the run stage => did not crash on the malformed environment.
+    run_stdio.assert_awaited_once()
+    amap = fresh.availability_map()
+    assert amap["envA"]["reachable"] is True
+    assert amap["envBROKEN"]["reachable"] is False
+    assert "base_dsn" in (amap["envBROKEN"]["error"] or "")
+    assert set(fresh.get_environments()) == {"envA", "envBROKEN"}
+
+
+# --------------------------------------------------------------------------- #
+# F4 — LMHC_DB_ENVS allowlist (_apply_env_allowlist): unset -> all; set -> filter;
+# unknown -> dropped with a warning, never a crash; empty result -> still returns.
+# --------------------------------------------------------------------------- #
+def test_apply_env_allowlist_unset_returns_all(monkeypatch):
+    monkeypatch.delenv("LMHC_DB_ENVS", raising=False)
+    conns = {"prep": {"a": 1}, "prod": {"b": 2}}
+    assert server._apply_env_allowlist(conns) == conns  # pyright: ignore[reportPrivateUsage]
+
+
+def test_apply_env_allowlist_blank_returns_all(monkeypatch):
+    monkeypatch.setenv("LMHC_DB_ENVS", "   ")
+    conns = {"prep": {}, "prod": {}}
+    assert server._apply_env_allowlist(conns) == conns  # pyright: ignore[reportPrivateUsage]
+
+
+def test_apply_env_allowlist_filters_to_listed(monkeypatch):
+    monkeypatch.setenv("LMHC_DB_ENVS", "prod, prep")  # whitespace tolerated
+    conns = {"prep": {"a": 1}, "prod": {"b": 2}, "uat1": {"c": 3}}
+    out = server._apply_env_allowlist(conns)  # pyright: ignore[reportPrivateUsage]
+    assert set(out) == {"prep", "prod"}
+    assert out["prod"] == {"b": 2}
+    assert "uat1" not in out
+
+
+def test_apply_env_allowlist_drops_unknown_without_crashing(monkeypatch):
+    monkeypatch.setenv("LMHC_DB_ENVS", "prod,ghost")
+    conns = {"prep": {}, "prod": {}}
+    out = server._apply_env_allowlist(conns)  # pyright: ignore[reportPrivateUsage]
+    assert set(out) == {"prod"}  # unknown 'ghost' silently dropped (with warning), no crash
+
+
+def test_apply_env_allowlist_all_unknown_starts_with_zero(monkeypatch):
+    monkeypatch.setenv("LMHC_DB_ENVS", "ghost1,ghost2")
+    conns = {"prep": {}, "prod": {}}
+    out = server._apply_env_allowlist(conns)  # pyright: ignore[reportPrivateUsage]
+    assert out == {}  # every name unknown -> zero active envs, but still returns (server starts)

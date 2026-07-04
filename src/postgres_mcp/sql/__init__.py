@@ -3,8 +3,10 @@
 from .bind_params import ColumnCollector
 from .bind_params import SqlBindParams
 from .bind_params import TableAliasVisitor
+from .db_conn_pool_registry import DEFAULT_ENV
 from .db_conn_pool_registry import DatabaseValidationError
 from .db_conn_pool_registry import DbConnPoolRegistry
+from .db_conn_pool_registry import EnvAvailability
 from .db_conn_pool_registry import ValidationResult
 from .extension_utils import check_extension
 from .extension_utils import check_hypopg_installation_status
@@ -18,10 +20,12 @@ from .sql_driver import SqlDriver
 from .sql_driver import obfuscate_password
 
 __all__ = [
+    "DEFAULT_ENV",
     "ColumnCollector",
     "DatabaseValidationError",
     "DbConnPool",
     "DbConnPoolRegistry",
+    "EnvAvailability",
     "IndexDefinition",
     "SafeSqlDriver",
     "SqlBindParams",
