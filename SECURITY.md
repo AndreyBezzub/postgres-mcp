@@ -292,9 +292,15 @@ A concrete example of Posture B, as deployed for the HootCore platform (verified
 2026-06-03). Use it as a template; the values are environment-specific.
 
 - **Distribution:** the fork ships to the team via the internal `hc-ai-tooling`
-  marketplace and is wired into the `db`/`infra` MCP profiles; servers are named
-  `pg-{env}` for `env ∈ {prep, prod, prod-replica, uat2}`, each in multi-DB mode
-  (`lm-platform-data`, `hc-platform-oms-data`, `lm-e-commerce`, …).
+  marketplace as the `lmhc-db` plugin. Since `v1.0.0-hc.1` it runs as a **single `pg`
+  server** (started through `run_multi`) that fronts every provisioned environment —
+  `env ∈ {uat1, uat2, prep, prod, prod-replica}` — with the target selected per call by the
+  `environment` tool argument (gated by the `LMHC_DB_ENVS` allowlist), not by a
+  per-environment server key. Each environment exposes its own databases
+  (`lm-platform-data`, `hc-platform-oms-data`, `lm-e-commerce`, …). The `run_multi` path
+  defaults to `--access-mode restricted`; the team runs it `unrestricted` on the strength of
+  the role hardening below. *(Prior to `v1.0.0-hc.1` this shipped as one server per
+  environment, named `pg-{env}`.)*
 - **Role:** every server connects as **`mcp_readonly`**, a managed Aiven role.
 - **Credentials & secrets:** sourced from Vault at provisioning time, cached locally
   (host/port/user in `connections.json`, password in the Windows Credential Manager) so
@@ -327,7 +333,7 @@ idle_in_transaction_session_timeout   = 1min
 default_transaction_read_only         = on
 ```
 
-Because the role meets every §5 requirement, HootCore can run these servers in
+Because the role meets every §5 requirement, HootCore can run this server in
 `--access-mode unrestricted` to unlock full analytical SQL and `EXPLAIN ANALYZE` without
 weakening the read-only guarantee. The `ALTER ROLE` change required an Aiven admin (the
 role cannot alter itself) and a server reconnect to take effect (see §9).

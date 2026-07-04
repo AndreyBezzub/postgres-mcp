@@ -3,7 +3,6 @@
 <img src="assets/postgres-mcp-pro.png" alt="Postgres MCP Pro Logo" width="600"/>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![PyPI - Version](https://img.shields.io/pypi/v/postgres-mcp)](https://pypi.org/project/postgres-mcp/)
 [![Discord](https://img.shields.io/discord/1336769798603931789?label=Discord)](https://discord.gg/4BEHC7ZM)
 [![Twitter Follow](https://img.shields.io/twitter/follow/auto_dba?style=flat)](https://x.com/auto_dba)
 [![Contributors](https://img.shields.io/github/contributors/crystaldba/postgres-mcp)](https://github.com/crystaldba/postgres-mcp/graphs/contributors)
@@ -267,6 +266,38 @@ How it works:
 
 > **Limitation — `pg_stat_statements` is server-global.** The `pg_stat_statements` extension tracks statements across all databases on the server, so `get_top_queries` and `analyze_workload_indexes` report queries from the **entire server** regardless of the `database_name` you pass. The view also only exists in databases where `CREATE EXTENSION pg_stat_statements` has been run; querying it from a database without the extension fails.
 
+## Multi-environment mode
+
+The `--databases` mode above serves several databases on **one** PostgreSQL host that share **one** set of credentials. **Multi-environment mode** goes further: a single server can front **several PostgreSQL servers** — for example separate `uat1`, `uat2`, `prep`, `prod`, and a `prod-replica` — each with its own DSN and its own set of databases. This is the model used by the HootCore `lmhc-db` plugin, which resolves credentials per environment and starts the server through the `run_multi` entry point rather than the CLI.
+
+Unlike the CLI (`main()`), multi-environment mode is driven programmatically via `run_multi(connections, access_mode, transport)`:
+
+```python
+from postgres_mcp import run_multi
+
+run_multi(
+    connections={
+        "prod":         {"base_dsn": "postgresql://user:pw@prod-host:5432/postgres",    "databases": ["orders", "catalog"]},
+        "prod-replica": {"base_dsn": "postgresql://user:pw@replica-host:5432/postgres", "databases": ["orders"]},
+        "uat2":         {"base_dsn": "postgresql://user:pw@uat2-host:5432/postgres",    "databases": ["orders"]},
+    },
+    access_mode="restricted",   # default; use "unrestricted" only with a hardened role (see SECURITY.md)
+    transport="stdio",
+)
+```
+
+`connections` maps `environment -> {"base_dsn", "databases"}`, already resolved by the caller; credentials stay in memory and never pass through `argv` or a shared environment variable. A replica is just another environment key — the fork has no dedicated "replica" concept and stays credential- and replica-agnostic.
+
+Key behaviors:
+
+- **`environment` argument on every SQL tool.** In multi-environment mode each SQL tool (`execute_sql`, `list_schemas`, `explain_query`, …) requires **both** `environment` and `database_name` — there is no single default DSN to fall back to. The LLM selects the environment per call.
+- **Non-fatal startup.** Every environment is probed in parallel with a short timeout. An unreachable host (VPN/PG down), a probe timeout, or a malformed/incomplete spec (missing or `None` `base_dsn`) is recorded as `reachable=false` in an availability map — it never aborts the server. The server **always** starts; one bad environment never takes down the others.
+- **`LMHC_DB_ENVS` allowlist.** Unset → all provisioned environments are active. Set to a comma-separated list → only those environments are activated; unknown names are dropped with a startup warning, never a crash.
+- **`list_databases`** returns the global availability map (`{"mode": "multi-env", "environments": {env: {reachable, dbs_ok, dbs_missing, error}}}`) so the agent can see which environments and databases are currently usable.
+- **`reconnect` recovery.** If an environment goes unreachable mid-session (e.g. the VPN dropped), call `reconnect` once it is back to re-probe **only** the currently-unreachable environments and rebuild their pools; healthy environments and their in-flight queries are left untouched. Pass `reconnect(environment="prod")` to force a re-probe of one specific environment. No server restart needed (lazy per-touch recovery also works).
+
+The single-DB and `--databases` CLI modes above are unchanged and remain the way to run the server against a single PostgreSQL host.
+
 ## SSE Transport
 
 Postgres MCP Pro supports the [SSE transport](https://modelcontextprotocol.io/docs/concepts/transports#server-sent-events-sse), which allows multiple MCP clients to share one server, possibly a remote server.
@@ -380,6 +411,12 @@ Postgres MCP Pro Tools:
 | `analyze_workload_indexes` | Analyzes the database workload to identify resource-intensive queries, then recommends optimal indexes for them. |
 | `analyze_query_indexes` | Analyzes a list of specific SQL queries (up to 10) and recommends optimal indexes for them. |
 | `analyze_db_health` | Performs comprehensive health checks including: buffer cache hit rates, connection health, constraint validation, index health (duplicate/unused/invalid), sequence limits, and vacuum health. |
+| `list_databases` | Lists the databases (single / `--databases` mode) or the per-environment availability map (multi-environment mode) this server can access. Global — takes no arguments. |
+| `reconnect` | *(Multi-environment mode only.)* Re-probes currently-unreachable environments and rebuilds their pools, leaving healthy environments untouched. Optional `environment` re-probes just one. |
+
+> In **`--databases` mode** every SQL tool above also takes a `database_name` argument; in
+> **multi-environment mode** they take both `environment` and `database_name` (see the mode
+> sections above). `list_databases` and `reconnect` are additions in this fork.
 
 
 ## Related Projects

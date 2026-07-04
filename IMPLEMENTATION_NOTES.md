@@ -4,12 +4,20 @@
 > map them onto the *actual* code at commit `v0.3.0-12-g07eb329`. Line numbers below are
 > from the current files, not the brief.
 
+> **Superseded/extended by `v1.0.0-hc.1` multi-environment support (see [`CHANGELOG.md`](./CHANGELOG.md)).**
+> These notes describe the original multi-*database* feature (`--databases`, one PG host). The
+> shipped registry now keys pools by **`(environment, database)`** and also drives a
+> multi-*environment* path (`run_multi`, non-fatal startup, `reconnect`, `LMHC_DB_ENVS`). Where
+> this document says "keyed by database name", read "keyed by `(environment, database)`" — the
+> single/`--databases` path uses a synthetic default environment.
+
 ## 1. Architecture overview
 
 **(a) Registry replaces the singleton.** Today `server.py:57` holds one global
 `db_connection = DbConnPool()` bound to a single database. We replace it with a single
-`db_registry = DbConnPoolRegistry()`. The registry owns a `name -> DbConnPool` map, one
-`DbConnPool` per validated database. All credentials/host come from the one `DATABASE_URI`;
+`db_registry = DbConnPoolRegistry()`. The registry owns a `(environment, database) -> DbConnPool`
+map, one `DbConnPool` per validated database (the single/`--databases` path stores every entry
+under a synthetic default environment). All credentials/host come from the one `DATABASE_URI`;
 each per-database `DbConnPool` is built by swapping only the dbname (path) of that URI.
 Every tool gains a `database_name` parameter and resolves its driver through
 `get_sql_driver(database_name)`, which fetches the right pool from the registry.
@@ -65,10 +73,10 @@ class DatabaseValidationError(Exception):
 
 
 class DbConnPoolRegistry:
-    """Holds one DbConnPool per validated database on a single PG server."""
+    """Holds one DbConnPool per (environment, database)."""
 
     def __init__(self) -> None:
-        self._pools: Dict[str, DbConnPool] = {}
+        self._pools: Dict[Tuple[str, str], DbConnPool] = {}  # keyed by (environment, database)
         self._base_url: Optional[str] = None
         self._discovery_db: Optional[str] = None
         self._mode: str = "single"  # "single" | "multi"
@@ -463,9 +471,10 @@ them. Example client config:
 Note in the section that the dbname in `DATABASE_URI` is used as the *discovery* DB for
 validation and is the single-DB fallback when `--databases` is omitted.
 
-**CHANGELOG:** the repo has no `CHANGELOG.md`; the record of record is Conventional Commit
-messages. If a changelog is added later, the entry would be:
-`feat(server): add multi-database support via --databases`.
+**CHANGELOG:** the multi-database work is recorded in [`CHANGELOG.md`](./CHANGELOG.md) under
+`v0.4.0-hc.1` (`feat(server): add multi-database support via --databases`). *(Historical note:
+when these notes were first written the repo had no `CHANGELOG.md`; one was added later and now
+documents both `v0.4.0-hc.1` and the `v1.0.0-hc.1` multi-environment release.)*
 
 ## 7. Risk log
 
@@ -485,12 +494,16 @@ messages. If a changelog is added later, the entry would be:
    mutation propagates live with no rebuild. Confirmed working for `@mcp.tool`, `mcp.add_tool`,
    and `@validate_call`-wrapped tools. Full code in §4. No fallback needed.
 
-3. **`_POSTGRES_VERSION` global cache is NOT keyed by database** (`sql/extension_utils.py:12-14`,
-   with an explicit TODO). For THIS task it is **safe**: all databases live on the *same* PG
-   server, so the server version is identical across them. It would become a real bug only
-   under multi-server (explicitly out of scope). The HypoPG check
-   (`check_hypopg_installation_status`) is queried live per call (no cache), so per-DB
-   extension differences are handled correctly.
+3. **`_POSTGRES_VERSION` global cache is NOT keyed by database or environment**
+   (`sql/extension_utils.py:12-14`, with an explicit TODO). It was safe for the original
+   multi-*database* task: all databases live on the *same* PG server, so the server version is
+   identical across them. ⚠️ **This is now a LIVE concern on the multi-environment path**
+   (`v1.0.0-hc.1`): different environments (`uat1`/`prep`/`prod`/`prod-replica`) are distinct
+   servers that may run **different PostgreSQL versions**, so a version cached from the first
+   environment touched can be wrong for another. Multi-server is no longer out of scope — the
+   cache should be keyed by environment (or dropped) before relying on version-gated behavior
+   across environments. The HypoPG check (`check_hypopg_installation_status`) is queried live per
+   call (no cache), so per-DB/-env extension differences are still handled correctly.
 
 4. **`pg_stat_statements` is server-global, not per-database.** It is a `shared_preload_library`
    that tracks statements across *all* databases; the `pg_stat_statements` view has a `dbid`
