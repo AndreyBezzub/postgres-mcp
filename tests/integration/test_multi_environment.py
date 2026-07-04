@@ -101,7 +101,8 @@ class TestMultiEnvironment:
             rows_a = await driver_a.execute_query("SELECT current_database() AS db")
             assert rows_a[0].cells["db"] == "test_db"
 
-            # envB recovers; reconnect re-probes every env and restores it (no restart).
+            # envB recovers; reconnect re-probes the unreachable env and restores it (no
+            # restart; healthy envA is left untouched).
             ct_b.unpause()
             time.sleep(2)  # let PostgreSQL resume accepting connections
             amap2 = await reg.reconnect_all()

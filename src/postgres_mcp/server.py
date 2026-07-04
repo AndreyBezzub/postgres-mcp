@@ -617,22 +617,29 @@ async def list_databases() -> dict[str, Any]:
 
 
 @mcp.tool(
-    description="Re-probe all active environments and rebuild the per-environment availability map. "
-    "Use this to recover after an environment was unreachable (e.g. VPN/PG came back) without restarting the server.",
+    description="Re-probe unreachable environments and rebuild their availability, leaving healthy "
+    "environments (and their in-flight queries) untouched. Use this to recover after an environment "
+    "was unreachable (e.g. VPN/PG came back) without restarting the server. Pass 'environment' to force "
+    "a re-probe of one specific environment regardless of its current state.",
     annotations=ToolAnnotations(
         title="Reconnect",
         readOnlyHint=False,
     ),
 )
-async def reconnect() -> dict[str, Any]:
-    """Side-effecting: re-probe every active environment and return the refreshed map."""
+async def reconnect(
+    environment: Optional[str] = Field(
+        None,
+        description="Optional: re-probe only this environment. Omit to re-probe every currently-unreachable environment.",
+    ),
+) -> dict[str, Any]:
+    """Side-effecting: re-probe unreachable (or one specified) environment(s); return the refreshed map."""
     if not db_registry.multi_env:
         return {
             "mode": db_registry.mode,
             "error": "reconnect is only available in multi-environment mode.",
         }
     try:
-        availability = await db_registry.reconnect_all()
+        availability = await db_registry.reconnect_all(environment)
         return {"mode": "multi-env", "environments": availability}
     except Exception as e:
         logger.error(f"Error during reconnect: {obfuscate_password(str(e))}")

@@ -164,17 +164,35 @@ class DbConnPoolRegistry:
         Each environment is probed in parallel with a short timeout; an unreachable
         environment is recorded as ``reachable=False`` with a masked reason and never
         aborts startup.
+
+        This method NEVER raises: every per-environment failure — unreachable host, probe
+        timeout, OR a malformed/incomplete spec (missing or ``None`` ``base_dsn``) — is
+        captured in the returned availability map. This is the guarantee ``run_multi`` relies
+        on to always start the server.
         """
         self._multi_env = True
         self._mode = "multi"
 
         async def probe_one(env: str, spec: Mapping[str, Any]) -> Tuple[str, EnvAvailability]:
-            base_dsn = spec["base_dsn"]
-            databases = list(spec.get("databases") or [])
-            self._base_urls[env] = base_dsn
-            self._discovery_dbs[env] = self._discovery_dbname(base_dsn)
-            self._requested_dbs[env] = databases
+            # NON-FATAL contract: a malformed or incomplete spec for ONE environment must be
+            # recorded as unreachable, never raise — otherwise one bad entry would abort
+            # startup for every environment. Every field access lives INSIDE the try, so a
+            # missing "base_dsn" (KeyError) or a None base_dsn (urlparse TypeError) becomes a
+            # recorded reason rather than an escaping exception.
+            databases: List[str] = []
             try:
+                databases = list(spec.get("databases") or [])
+                base_dsn = spec.get("base_dsn")
+                if not isinstance(base_dsn, str) or not base_dsn:
+                    return env, EnvAvailability(
+                        reachable=False,
+                        dbs_ok=[],
+                        dbs_missing=list(databases),
+                        error=f"Invalid connection spec for environment '{env}': 'base_dsn' is missing or empty",
+                    )
+                self._base_urls[env] = base_dsn
+                self._discovery_dbs[env] = self._discovery_dbname(base_dsn)
+                self._requested_dbs[env] = databases
                 registered, missing = await asyncio.wait_for(
                     self._probe_env(env, base_dsn, databases),
                     timeout=PROBE_TIMEOUT_SECONDS,
@@ -195,27 +213,64 @@ class DbConnPoolRegistry:
                     error=obfuscate_password(str(e)),
                 )
 
-        results = await asyncio.gather(*(probe_one(env, spec) for env, spec in connections.items()))
+        # return_exceptions=True is defense-in-depth: probe_one is written never to raise,
+        # but if a future change regresses that, fold the failure into the map instead of
+        # letting it propagate out of run_multi and crash the whole server.
+        items = list(connections.items())
+        results = await asyncio.gather(
+            *(probe_one(env, spec) for env, spec in items),
+            return_exceptions=True,
+        )
         # Assign in the caller's environment order (deterministic map ordering).
-        for env, snap in results:
-            self._availability[env] = snap
+        for (env, _spec), res in zip(items, results):
+            if isinstance(res, BaseException):
+                self._availability[env] = EnvAvailability(
+                    reachable=False,
+                    dbs_ok=[],
+                    dbs_missing=[],
+                    error=obfuscate_password(str(res)) or "unexpected error during environment registration",
+                )
+            else:
+                res_env, snap = res
+                self._availability[res_env] = snap
         return self.availability_map()
 
-    async def reconnect_all(self) -> Dict[str, Dict[str, Any]]:
-        """Re-probe every known environment, rebuild pools + availability, return the map.
+    async def reconnect_all(self, environment: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+        """Re-probe environments and rebuild their pools, returning the full availability map.
 
-        Side-effecting: closes and discards existing pools, then re-runs the non-fatal
-        probe against the originally-requested database list per environment.
+        By default only environments currently marked unreachable are re-probed, so healthy
+        environments — and any in-flight queries against their pools — are left completely
+        untouched (no blast radius on unrelated environments). Pass ``environment`` to force a
+        re-probe of one specific environment regardless of its current state. Environments that
+        are not re-probed keep their existing pools and availability entry. Non-fatal, like
+        :meth:`register_environments`.
         """
-        connections = {
-            env: {"base_dsn": self._base_urls[env], "databases": self._requested_dbs.get(env, [])}
-            for env in self.get_environments()
-        }
-        await self.close_all()
-        self._pools.clear()
-        self._locks.clear()
-        self._availability.clear()
-        return await self.register_environments(connections)
+        known = self.get_environments()
+        if environment is not None:
+            candidates = [environment] if environment in known else []
+        else:
+            candidates = [env for env, snap in self._availability.items() if not snap.reachable]
+        # Skip environments that never registered a base DSN (a malformed spec): there is
+        # nothing to reconnect to, and their availability entry is left as-is.
+        targets = [env for env in candidates if env in self._base_urls]
+
+        for env in targets:
+            await self._close_env(env)  # closes ONLY this env's pools; healthy envs untouched
+            self._availability.pop(env, None)
+
+        if targets:
+            connections = {env: {"base_dsn": self._base_urls[env], "databases": self._requested_dbs.get(env, [])} for env in targets}
+            await self.register_environments(connections)
+        return self.availability_map()
+
+    async def _close_env(self, environment: str) -> None:
+        """Close and drop every pool/lock registered under a single environment."""
+        keys = [key for key in list(self._pools) if key[0] == environment]
+        for key in keys:
+            pool = self._pools.pop(key, None)
+            self._locks.pop(key, None)
+            if pool is not None:
+                await pool.close()
 
     # ------------------------------------------------------------------ #
     # Pool access (both paths)

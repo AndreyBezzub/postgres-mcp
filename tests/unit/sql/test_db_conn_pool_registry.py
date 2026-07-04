@@ -486,3 +486,180 @@ async def test_availability_error_masks_password():
     assert err is not None
     assert secret not in err
     assert "****" in err  # password position redacted, not simply dropped
+
+
+# --------------------------------------------------------------------------- #
+# F1 — non-fatal startup must survive a MALFORMED/incomplete per-environment spec
+# (missing or None base_dsn), not just a network-level failure. One bad entry must
+# never abort registration for the other environments.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_register_environments_non_fatal_on_missing_or_none_base_dsn():
+    """A spec missing base_dsn (KeyError) or with base_dsn=None (urlparse TypeError) is
+    recorded unreachable; register_environments never raises and the good env still registers."""
+    ctrl = {"down": False}
+    env_by_host = {"host-a": _make_env_pool(["test_db"], ctrl)}
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        amap = await reg.register_environments(
+            {
+                "good": {"base_dsn": ENV_A_DSN, "databases": ["test_db"]},
+                "missing": {"databases": ["test_db"]},  # no base_dsn key -> KeyError trigger
+                "none": {"base_dsn": None, "databases": ["x"]},  # None -> urlparse TypeError trigger
+            }
+        )
+
+    # The good environment came up normally.
+    assert amap["good"]["reachable"] is True
+    assert amap["good"]["dbs_ok"] == ["test_db"]
+    # Both malformed specs are recorded unreachable with a reason — never crashed startup.
+    assert amap["missing"]["reachable"] is False
+    assert "base_dsn" in (amap["missing"]["error"] or "")
+    assert amap["none"]["reachable"] is False
+    assert "base_dsn" in (amap["none"]["error"] or "")
+    # No pools registered for the malformed envs; all three envs are known.
+    assert reg.get_names_for_env("missing") == []
+    assert reg.get_names_for_env("none") == []
+    assert set(reg.get_environments()) == {"good", "missing", "none"}
+
+
+# --------------------------------------------------------------------------- #
+# F2 — reconnect must NOT rebuild pools for healthy environments (no blast radius),
+# and must support scoping to a single environment.
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_reconnect_only_reprobes_unreachable_leaves_healthy_untouched():
+    """reconnect_all() re-probes only currently-unreachable envs; a healthy env's pool is
+    never closed or rebuilt, so concurrent queries against it cannot be disrupted."""
+    ctrl_a = {"down": False}  # healthy throughout
+    ctrl_b = {"down": True}  # unreachable at startup
+    pool_a = _make_env_pool(["orders"], ctrl_a)
+    pool_b = _make_env_pool(["catalog"], ctrl_b)
+    env_by_host = {"host-a": pool_a, "host-b": pool_b}
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        await reg.register_environments(
+            {
+                "envA": {"base_dsn": ENV_A_DSN, "databases": ["orders"]},
+                "envB": {"base_dsn": ENV_B_DSN, "databases": ["catalog"]},
+            }
+        )
+        # envA healthy with an opened lazy pool; envB unreachable.
+        await reg.get_pool("orders", "envA")
+        pool_a.close.reset_mock()  # ignore the discovery-pool close from registration
+
+        ctrl_b["down"] = False  # envB recovers
+        amap = await reg.reconnect_all()
+
+    # envB was re-probed and recovered.
+    assert amap["envB"]["reachable"] is True
+    assert reg.get_names_for_env("envB") == ["catalog"]
+    # Healthy envA was left completely untouched: its pool was NOT closed by the reconnect.
+    pool_a.close.assert_not_awaited()
+    assert amap["envA"]["reachable"] is True
+    assert reg.get_names_for_env("envA") == ["orders"]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_scoped_to_named_environment():
+    """reconnect_all(environment=X) re-probes only X (even if healthy) and leaves every other
+    environment's pool untouched."""
+    ctrl_a = {"down": False}
+    ctrl_b = {"down": False}
+    pool_a = _make_env_pool(["orders"], ctrl_a)
+    pool_b = _make_env_pool(["catalog"], ctrl_b)
+    env_by_host = {"host-a": pool_a, "host-b": pool_b}
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)):
+        reg = DbConnPoolRegistry()
+        await reg.register_environments(
+            {
+                "envA": {"base_dsn": ENV_A_DSN, "databases": ["orders"]},
+                "envB": {"base_dsn": ENV_B_DSN, "databases": ["catalog"]},
+            }
+        )
+        await reg.get_pool("orders", "envA")  # open envA's pool
+        pool_a.close.reset_mock()
+        pool_b.close.reset_mock()
+
+        amap = await reg.reconnect_all(environment="envA")
+
+    # envA was force-re-probed (its old pool closed), envB (not named) untouched.
+    pool_a.close.assert_awaited()
+    pool_b.close.assert_not_awaited()
+    assert amap["envA"]["reachable"] is True
+    assert reg.get_names_for_env("envA") == ["orders"]
+    assert amap["envB"]["reachable"] is True
+
+
+# --------------------------------------------------------------------------- #
+# F3 — the run_multi ENTRY POINT itself must start the server even when one env's
+# spec is malformed (the flagship non-fatal guarantee, exercised end-to-end — not
+# just at the register_environments level).
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_run_multi_starts_despite_malformed_env_spec(monkeypatch):
+    """server.run_multi() reaches the transport-run stage without raising when one
+    environment's spec is malformed; the good env is reachable, the bad one recorded."""
+    monkeypatch.delenv("LMHC_DB_ENVS", raising=False)
+    ctrl = {"down": False}
+    env_by_host = {"host-a": _make_env_pool(["test_db"], ctrl)}
+    fresh = DbConnPoolRegistry()
+    connections = {
+        "envA": {"base_dsn": ENV_A_DSN, "databases": ["test_db"]},
+        "envBROKEN": {"databases": ["test_db"]},  # missing base_dsn -> must NOT crash startup
+    }
+    with (
+        patch("postgres_mcp.server.db_registry", fresh),
+        patch("postgres_mcp.server.current_access_mode", AccessMode.UNRESTRICTED),
+        patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=_make_multi_env_factory(env_by_host)),
+        patch.object(server.mcp, "add_tool"),
+        patch.object(server.mcp, "run_stdio_async", AsyncMock()) as run_stdio,
+    ):
+        await server.run_multi(connections=connections, access_mode="restricted", transport="stdio")
+
+    # Reached the run stage => did not crash on the malformed environment.
+    run_stdio.assert_awaited_once()
+    amap = fresh.availability_map()
+    assert amap["envA"]["reachable"] is True
+    assert amap["envBROKEN"]["reachable"] is False
+    assert "base_dsn" in (amap["envBROKEN"]["error"] or "")
+    assert set(fresh.get_environments()) == {"envA", "envBROKEN"}
+
+
+# --------------------------------------------------------------------------- #
+# F4 — LMHC_DB_ENVS allowlist (_apply_env_allowlist): unset -> all; set -> filter;
+# unknown -> dropped with a warning, never a crash; empty result -> still returns.
+# --------------------------------------------------------------------------- #
+def test_apply_env_allowlist_unset_returns_all(monkeypatch):
+    monkeypatch.delenv("LMHC_DB_ENVS", raising=False)
+    conns = {"prep": {"a": 1}, "prod": {"b": 2}}
+    assert server._apply_env_allowlist(conns) == conns
+
+
+def test_apply_env_allowlist_blank_returns_all(monkeypatch):
+    monkeypatch.setenv("LMHC_DB_ENVS", "   ")
+    conns = {"prep": {}, "prod": {}}
+    assert server._apply_env_allowlist(conns) == conns
+
+
+def test_apply_env_allowlist_filters_to_listed(monkeypatch):
+    monkeypatch.setenv("LMHC_DB_ENVS", "prod, prep")  # whitespace tolerated
+    conns = {"prep": {"a": 1}, "prod": {"b": 2}, "uat1": {"c": 3}}
+    out = server._apply_env_allowlist(conns)
+    assert set(out) == {"prep", "prod"}
+    assert out["prod"] == {"b": 2}
+    assert "uat1" not in out
+
+
+def test_apply_env_allowlist_drops_unknown_without_crashing(monkeypatch):
+    monkeypatch.setenv("LMHC_DB_ENVS", "prod,ghost")
+    conns = {"prep": {}, "prod": {}}
+    out = server._apply_env_allowlist(conns)
+    assert set(out) == {"prod"}  # unknown 'ghost' silently dropped (with warning), no crash
+
+
+def test_apply_env_allowlist_all_unknown_starts_with_zero(monkeypatch):
+    monkeypatch.setenv("LMHC_DB_ENVS", "ghost1,ghost2")
+    conns = {"prep": {}, "prod": {}}
+    out = server._apply_env_allowlist(conns)
+    assert out == {}  # every name unknown -> zero active envs, but still returns (server starts)

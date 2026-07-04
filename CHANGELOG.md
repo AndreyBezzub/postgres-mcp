@@ -23,16 +23,21 @@ squash-merge commit is marked `!` / `BREAKING CHANGE:` so the release tag become
 - **New non-fatal startup path.** `register_environments()` probes every
   environment in parallel with short per-env timeouts and builds an availability
   map `env -> {reachable, dbs_ok, dbs_missing, error}`. It never raises and never
-  calls `sys.exit`: the server ALWAYS starts, and an unreachable environment
-  (VPN/PG down) is simply marked unavailable with a reason.
+  calls `sys.exit`: the server ALWAYS starts, and a failing environment — an
+  unreachable host (VPN/PG down), a probe timeout, OR a malformed/incomplete
+  connection spec (missing or `None` `base_dsn`) — is simply marked unavailable
+  with a reason. One bad environment entry never aborts the others.
 - **`run_multi()` entry point** in `src/postgres_mcp/__init__.py`, mirroring
   `main()` (applies `WindowsSelectorEventLoopPolicy`, then
   `asyncio.run(server.run_multi(...))`). It receives an already-resolved
   `env -> {base_dsn, databases}` map. The fork stays credential-agnostic and
   replica-agnostic — a replica (e.g. `prod-replica`) is just another environment
   key with its own base DSN; the fork has no "replica" concept of its own.
-- **`reconnect` tool** (side-effecting): re-probes every active environment,
-  rebuilds pools, and returns the refreshed availability map. Enables recovery
+- **`reconnect` tool** (side-effecting): re-probes environments that are
+  currently unreachable and rebuilds their pools, returning the refreshed
+  availability map — healthy environments and their in-flight queries are left
+  untouched (no blast radius). An optional `environment` argument forces a
+  re-probe of one specific environment regardless of its state. Enables recovery
   from an environment that went unreachable mid-session without restarting the
   MCP server (lazy per-touch recovery also works).
 - **`LMHC_DB_ENVS` allowlist.** Unset → all provisioned environments active; set
