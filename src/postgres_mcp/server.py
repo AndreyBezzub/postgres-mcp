@@ -887,10 +887,7 @@ async def run_multi(
 
     # Dynamic parameter-description injection for the multi-environment tool surface.
     envs = db_registry.get_environments()
-    env_desc = (
-        f"Target environment. Available: {', '.join(envs) or '(none)'}. "
-        "Required; call list_databases for the current list."
-    )
+    env_desc = f"Target environment. Available: {', '.join(envs) or '(none)'}. Required; call list_databases for the current list."
     globals()["ENVIRONMENT_PARAM_DESC"] = env_desc
     _inject_param_description("environment", env_desc)
     db_desc = "Target database within the selected environment. Required; call list_databases for available names."

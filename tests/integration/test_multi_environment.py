@@ -166,9 +166,7 @@ class TestMultiEnvironment:
             # The write must not have taken effect on ANY (env, db) pool.
             for env, db in pairs:
                 driver = SqlDriver(conn=await reg.get_pool(db, env))
-                rows = await driver.execute_query(
-                    "SELECT count(*) AS n FROM information_schema.tables WHERE table_name = 'guard_probe'"
-                )
+                rows = await driver.execute_query("SELECT count(*) AS n FROM information_schema.tables WHERE table_name = 'guard_probe'")
                 assert rows[0].cells["n"] == 0, f"guard_probe leaked into ({env}, {db})"
 
             # Control: the same DDL is accepted under UNRESTRICTED -> the refusal above
