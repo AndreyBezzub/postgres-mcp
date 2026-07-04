@@ -273,6 +273,9 @@ The `--databases` mode above serves several databases on **one** PostgreSQL host
 Unlike the CLI (`main()`), multi-environment mode is driven programmatically via `run_multi(connections, access_mode, transport)`:
 
 ```python
+# launcher.py — resolve your credentials however you like (Vault, a secrets
+# manager, env), then hand the resolved map to run_multi. There is no CLI entry
+# point for this mode, so this small launcher IS the server executable.
 from postgres_mcp import run_multi
 
 run_multi(
@@ -287,6 +290,26 @@ run_multi(
 ```
 
 `connections` maps `environment -> {"base_dsn", "databases"}`, already resolved by the caller; credentials stay in memory and never pass through `argv` or a shared environment variable. A replica is just another environment key — the fork has no dedicated "replica" concept and stays credential- and replica-agnostic.
+
+### Registering it with an MCP client
+
+Because this mode has no CLI entry point (the `postgres-mcp` console script drives the single/`--databases` `main()` path only), you register the **launcher above** as an ordinary stdio server — its `command` runs your `launcher.py` instead of `postgres-mcp`:
+
+```json
+{
+  "mcpServers": {
+    "pg": {
+      "command": "python",
+      "args": ["/absolute/path/to/launcher.py"],
+      "env": {
+        "LMHC_DB_ENVS": "prod,prod-replica"
+      }
+    }
+  }
+}
+```
+
+Note the contrast with `--databases` mode: **no `DATABASE_URI` and no credentials appear in the client config.** The launcher resolves them into the in-memory `connections` map, so secrets never pass through `argv` or a shared environment variable. `LMHC_DB_ENVS` is optional — omit it to activate every environment the launcher provides, or set it to a comma-separated subset (see the allowlist behavior below). The HootCore `lmhc-db` plugin ships exactly such a launcher (`scripts/launch.py`, which reads its connections from a local credential store) behind a small `.cmd` shim referenced from its `plugin.json` `mcpServers` block.
 
 Key behaviors:
 
