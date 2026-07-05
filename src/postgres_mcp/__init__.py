@@ -5,6 +5,8 @@ from typing import Dict
 
 from . import server
 from . import top_queries
+from .server import load_connections_file
+from .server import resolve_connections
 
 
 def _apply_windows_event_loop_policy() -> None:
@@ -40,7 +42,9 @@ def run_multi(
 
 # Optionally expose other important items at package level
 __all__ = [
+    "load_connections_file",
     "main",
+    "resolve_connections",
     "run_multi",
     "server",
     "top_queries",

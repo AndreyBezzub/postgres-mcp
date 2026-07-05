@@ -304,6 +304,44 @@ in the config you control (here the file) rather than being resolved in code. `L
 applies — omit it to activate every environment in the file, or set it to a comma-separated subset.
 Per-environment problems stay non-fatal (see the key behaviors below).
 
+#### Structured entries (keep the password off disk)
+
+An inline `base_dsn` carries the password in plaintext on disk. As an alternative, an entry may be
+**structured** — the DSN is assembled from discrete fields and the password comes from a typed
+**source** that is resolved at startup rather than stored in the file:
+
+```json
+{
+  "prod": {
+    "host": "prod-host",
+    "port": 5432,
+    "user": "mcp_readonly",
+    "dbname": "postgres",
+    "sslmode": "require",
+    "password": { "keyring": { "service": "my-app", "username": "prod" } },
+    "databases": ["orders", "catalog"]
+  }
+}
+```
+
+Only `host`, `user`, `dbname`, `password`, and `databases` are required; `port` and `sslmode` are
+optional. The `password` **source** is one of four shapes:
+
+- **Literal** — `"password": "s3cr3t"` (a plain string; equivalent to inlining it in a DSN).
+- **Environment variable** — `"password": { "env": "PGPASSWORD_PROD" }` (read from `os.environ`).
+- **File** — `"password": { "file": "/run/secrets/pg_prod" }` (read, trailing line endings stripped).
+- **Keyring** — `"password": { "keyring": { "service": "svc", "username": "user" } }` (read from the OS
+  credential store; requires `pip install postgres-mcp[keyring]`).
+
+The user and password are percent-encoded when the DSN is assembled, so reserved characters
+(`@ : / ` …) in credentials are handled correctly.
+
+Inline and structured entries can be mixed in one file. Top-level keys beginning with `_` (e.g.
+`_settings`) are **reserved** and skipped, so a config that carries its own metadata block can be fed
+to the loader unchanged. A per-environment resolution failure — a missing field, an unset env var, a
+keyring miss, the `[keyring]` extra not installed, an unreadable file, or an unsupported source — is
+**non-fatal**: it logs a warning and marks that one environment unreachable; the others still load.
+
 ### Programmatic config (`run_multi`, for embedding)
 
 When you embed the server in a host that resolves credentials itself (rather than reading a file), drive it programmatically:
