@@ -318,7 +318,7 @@ An inline `base_dsn` carries the password in plaintext on disk. As an alternativ
     "user": "mcp_readonly",
     "dbname": "postgres",
     "sslmode": "require",
-    "password": { "keyring": { "service": "pg-mcp", "username": "prod" } },
+    "password": { "keyring": { "service": "my-app", "username": "prod" } },
     "databases": ["orders", "catalog"]
   }
 }
