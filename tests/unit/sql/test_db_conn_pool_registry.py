@@ -662,3 +662,47 @@ def test_apply_env_allowlist_all_unknown_starts_with_zero(monkeypatch):
     conns = {"prep": {}, "prod": {}}
     out = server.apply_env_allowlist(conns)
     assert out == {}  # every name unknown -> zero active envs, but still returns (server starts)
+
+
+@pytest.mark.asyncio
+async def test_run_multi_exits_when_no_database_accessible():
+    """Zero accessible databases across all envs -> run_multi exits(1), transport never starts."""
+    all_down = {
+        "prep": {"reachable": False, "dbs_ok": [], "dbs_missing": ["lm-platform-data"], "error": "timeout"},
+        "uat2": {"reachable": False, "dbs_ok": [], "dbs_missing": ["lm-platform-data"], "error": "timeout"},
+    }
+    conns = {
+        "prep": {"base_dsn": "postgresql://u:p@prep:5432/postgres", "databases": ["lm-platform-data"]},
+        "uat2": {"base_dsn": "postgresql://u:p@uat2:5432/postgres", "databases": ["lm-platform-data"]},
+    }
+    with (
+        patch.object(server.db_registry, "register_environments", AsyncMock(return_value=all_down)),
+        patch.object(server.mcp, "run_stdio_async", AsyncMock()) as run_stdio,
+        patch.object(server, "_register_execute_sql_tool"),
+        patch.object(server, "_inject_param_description"),
+    ):
+        with pytest.raises(SystemExit) as exc:
+            await server.run_multi(conns)
+    assert exc.value.code == 1
+    run_stdio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_multi_starts_when_at_least_one_database_accessible():
+    """>=1 accessible DB (partial outage) -> run_multi stays non-fatal and runs the transport."""
+    partial = {
+        "prep": {"reachable": True, "dbs_ok": ["lm-platform-data"], "dbs_missing": [], "error": None},
+        "uat2": {"reachable": False, "dbs_ok": [], "dbs_missing": ["lm-platform-data"], "error": "timeout"},
+    }
+    conns = {
+        "prep": {"base_dsn": "postgresql://u:p@prep:5432/postgres", "databases": ["lm-platform-data"]},
+        "uat2": {"base_dsn": "postgresql://u:p@uat2:5432/postgres", "databases": ["lm-platform-data"]},
+    }
+    with (
+        patch.object(server.db_registry, "register_environments", AsyncMock(return_value=partial)),
+        patch.object(server.mcp, "run_stdio_async", AsyncMock()) as run_stdio,
+        patch.object(server, "_register_execute_sql_tool"),
+        patch.object(server, "_inject_param_description"),
+    ):
+        await server.run_multi(conns)
+    run_stdio.assert_awaited_once()

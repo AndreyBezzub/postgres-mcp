@@ -946,6 +946,21 @@ async def run_multi(
         ", ".join(db_registry.get_environments()) or "(none)",
     )
 
+    # Fail-fast: a DB MCP server with zero accessible databases in ANY environment is not doing its
+    # job. Exit non-zero so the MCP host surfaces it as failed (not a misleading "healthy" empty
+    # server); recovery is a /mcp reconnect (restart + re-probe) once access is restored. A PARTIAL
+    # outage (>=1 usable DB) stays non-fatal above — unreachable envs are marked unavailable and the
+    # in-server `reconnect` tool recovers them without a restart.
+    total_dbs_ok = sum(len(info["dbs_ok"]) for info in availability.values())
+    if total_dbs_ok == 0:
+        logger.error(
+            "No accessible database in any environment (probed %d: %s). Exiting so /mcp marks this "
+            "server as failed; restore access and reconnect via /mcp.",
+            len(availability),
+            ", ".join(availability.keys()) or "(none selected)",
+        )
+        sys.exit(1)
+
     # Dynamic parameter-description injection for the multi-environment tool surface.
     envs = db_registry.get_environments()
     env_desc = f"Target environment. Available: {', '.join(envs) or '(none)'}. Required; call list_databases for the current list."

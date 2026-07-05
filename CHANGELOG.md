@@ -5,6 +5,28 @@ scheme in [`VERSIONING.md`](./VERSIONING.md): `vMAJOR.MINOR.PATCH-hc.N`, where
 `MAJOR.MINOR.PATCH` is classified from Conventional Commits and `-hc.N` marks a
 fork release. Release tags are cut on `main` after a squash-merge.
 
+## v1.2.0-hc.1 — Fail-fast when no database is accessible (multi-env)
+
+The multi-environment entry point (`run_multi`, used by the lmhc-db plugin) now **exits with code 1
+when zero databases are accessible across all environments** — so the MCP host surfaces the server
+as failed instead of a misleading empty "healthy" one. Recover a total outage via a `/mcp` reconnect
+(restart + re-probe) once access is restored. Classified as a **MINOR** (observable startup-contract
+change).
+
+### Changed
+
+- **`run_multi` fails fast on a total outage.** After the non-fatal per-environment probing, it sums
+  `dbs_ok` across the availability map; if the total is 0 (all envs unreachable, reachable-but-no-DB,
+  or zero envs selected) it logs an error and `sys.exit(1)` before reaching the transport.
+
+### Notes
+
+- **Partial outages stay non-fatal.** With ≥1 usable database the server still starts; unreachable
+  environments are marked unavailable and the in-server `reconnect` tool recovers them without a
+  restart.
+- **The registry is unchanged.** `register_environments` / `_probe_env` / `reconnect` keep their
+  non-fatal contract — only the `run_multi` bootstrap decides to exit.
+
 ## v1.1.1-hc.1 — Remove pyright private-usage suppressions (refactor)
 
 Removes the accumulated `# pyright: ignore[reportPrivateUsage]` "crutches" by giving tests a
