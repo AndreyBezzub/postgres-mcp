@@ -10,7 +10,6 @@ import pytest
 import postgres_mcp.server as server
 from postgres_mcp.server import AccessMode
 from postgres_mcp.server import get_sql_driver
-from postgres_mcp.sql.db_conn_pool_registry import DEFAULT_ENV
 from postgres_mcp.sql.db_conn_pool_registry import DatabaseValidationError
 from postgres_mcp.sql.db_conn_pool_registry import DbConnPoolRegistry
 from postgres_mcp.sql.db_conn_pool_registry import ValidationResult
@@ -73,8 +72,7 @@ def _make_pool_factory(discovery_returns):
 
 def test_build_db_url_swaps_dbname_keeps_creds_and_host():
     reg = DbConnPoolRegistry()
-    reg._base_url = BASE_URL  # pyright: ignore[reportPrivateUsage]
-    assert reg._build_db_url("orders") == "postgresql://postgres:secret@localhost:5432/orders"  # pyright: ignore[reportPrivateUsage]
+    assert reg.build_db_url("orders", BASE_URL) == "postgresql://postgres:secret@localhost:5432/orders"
 
 
 @pytest.mark.parametrize(
@@ -87,7 +85,7 @@ def test_build_db_url_swaps_dbname_keeps_creds_and_host():
 )
 def test_discovery_dbname(url, expected):
     reg = DbConnPoolRegistry()
-    assert reg._discovery_dbname(url) == expected  # pyright: ignore[reportPrivateUsage]
+    assert reg.discovery_dbname(url) == expected
 
 
 @pytest.mark.asyncio
@@ -209,10 +207,10 @@ async def test_close_all_closes_every_pool():
 async def test_single_mode_default_get_sql_driver_resolves_sole_db():
     """get_sql_driver(None) resolves to the only registered DB in single mode."""
     mock_pool = MagicMock()
-    reg = DbConnPoolRegistry()
-    reg._mode = "single"  # pyright: ignore[reportPrivateUsage]
-    # Registry now keys pools by (environment, database); single/multi path uses DEFAULT_ENV.
-    reg._pools[(DEFAULT_ENV, "test_db")] = MagicMock()  # pyright: ignore[reportPrivateUsage]
+    factory, _, _ = _make_pool_factory([])
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=factory):
+        reg = DbConnPoolRegistry()
+        await reg.validate_and_register(BASE_URL, None)
     with (
         patch("postgres_mcp.server.db_registry", reg),
         patch.object(reg, "get_pool", AsyncMock(return_value=mock_pool)) as mock_get_pool,
@@ -229,9 +227,10 @@ async def test_single_mode_default_get_sql_driver_resolves_sole_db():
 @pytest.mark.asyncio
 async def test_list_databases_return_shape():
     """The list_databases tool returns {"databases": [...], "mode": "single"|"multi"}."""
-    reg = DbConnPoolRegistry()
-    reg._mode = "single"  # pyright: ignore[reportPrivateUsage]
-    reg._pools[(DEFAULT_ENV, "test_db")] = MagicMock()  # pyright: ignore[reportPrivateUsage]
+    factory, _, _ = _make_pool_factory([])
+    with patch("postgres_mcp.sql.db_conn_pool_registry.DbConnPool", side_effect=factory):
+        reg = DbConnPoolRegistry()
+        await reg.validate_and_register(BASE_URL, None)
     with patch("postgres_mcp.server.db_registry", reg):
         result = await server.list_databases()
 
@@ -627,25 +626,25 @@ async def test_run_multi_starts_despite_malformed_env_spec(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# F4 — LMHC_DB_ENVS allowlist (_apply_env_allowlist): unset -> all; set -> filter;
+# F4 — LMHC_DB_ENVS allowlist (apply_env_allowlist): unset -> all; set -> filter;
 # unknown -> dropped with a warning, never a crash; empty result -> still returns.
 # --------------------------------------------------------------------------- #
 def test_apply_env_allowlist_unset_returns_all(monkeypatch):
     monkeypatch.delenv("LMHC_DB_ENVS", raising=False)
     conns = {"prep": {"a": 1}, "prod": {"b": 2}}
-    assert server._apply_env_allowlist(conns) == conns  # pyright: ignore[reportPrivateUsage]
+    assert server.apply_env_allowlist(conns) == conns
 
 
 def test_apply_env_allowlist_blank_returns_all(monkeypatch):
     monkeypatch.setenv("LMHC_DB_ENVS", "   ")
     conns = {"prep": {}, "prod": {}}
-    assert server._apply_env_allowlist(conns) == conns  # pyright: ignore[reportPrivateUsage]
+    assert server.apply_env_allowlist(conns) == conns
 
 
 def test_apply_env_allowlist_filters_to_listed(monkeypatch):
     monkeypatch.setenv("LMHC_DB_ENVS", "prod, prep")  # whitespace tolerated
     conns = {"prep": {"a": 1}, "prod": {"b": 2}, "uat1": {"c": 3}}
-    out = server._apply_env_allowlist(conns)  # pyright: ignore[reportPrivateUsage]
+    out = server.apply_env_allowlist(conns)
     assert set(out) == {"prep", "prod"}
     assert out["prod"] == {"b": 2}
     assert "uat1" not in out
@@ -654,12 +653,12 @@ def test_apply_env_allowlist_filters_to_listed(monkeypatch):
 def test_apply_env_allowlist_drops_unknown_without_crashing(monkeypatch):
     monkeypatch.setenv("LMHC_DB_ENVS", "prod,ghost")
     conns = {"prep": {}, "prod": {}}
-    out = server._apply_env_allowlist(conns)  # pyright: ignore[reportPrivateUsage]
+    out = server.apply_env_allowlist(conns)
     assert set(out) == {"prod"}  # unknown 'ghost' silently dropped (with warning), no crash
 
 
 def test_apply_env_allowlist_all_unknown_starts_with_zero(monkeypatch):
     monkeypatch.setenv("LMHC_DB_ENVS", "ghost1,ghost2")
     conns = {"prep": {}, "prod": {}}
-    out = server._apply_env_allowlist(conns)  # pyright: ignore[reportPrivateUsage]
+    out = server.apply_env_allowlist(conns)
     assert out == {}  # every name unknown -> zero active envs, but still returns (server starts)

@@ -127,6 +127,11 @@ class DbConnPoolRegistry:
         """True if (environment, name) is a registered pool."""
         return (environment, name) in self._pools
 
+    def is_open(self, name: str, environment: str = DEFAULT_ENV) -> bool:
+        """True if the (environment, name) pool exists AND has been opened (lazy pools start closed)."""
+        pool = self._pools.get((environment, name))
+        return pool is not None and pool.is_valid
+
     def availability_map(self) -> Dict[str, Dict[str, Any]]:
         """Return the per-environment availability map (JSON-serializable)."""
         return {env: snap.to_dict() for env, snap in self._availability.items()}
@@ -141,7 +146,7 @@ class DbConnPoolRegistry:
         """
         self._base_url = base_url
         self._base_urls[DEFAULT_ENV] = base_url
-        self._discovery_db = self._discovery_dbname(base_url)
+        self._discovery_db = self.discovery_dbname(base_url)
         self._discovery_dbs[DEFAULT_ENV] = self._discovery_db
 
         if not database_names:  # single-DB mode
@@ -191,7 +196,7 @@ class DbConnPoolRegistry:
                         error=f"Invalid connection spec for environment '{env}': 'base_dsn' is missing or empty",
                     )
                 self._base_urls[env] = base_dsn
-                self._discovery_dbs[env] = self._discovery_dbname(base_dsn)
+                self._discovery_dbs[env] = self.discovery_dbname(base_dsn)
                 self._requested_dbs[env] = databases
                 registered, missing = await asyncio.wait_for(
                     self._probe_env(env, base_dsn, databases),
@@ -332,8 +337,8 @@ class DbConnPoolRegistry:
         Raises DatabaseValidationError if the discovery database is unreachable. Callers on
         the non-fatal path wrap this and record the failure in the availability map.
         """
-        discovery_db = self._discovery_dbname(base_url)
-        discovery_url = self._build_db_url(discovery_db, base_url)
+        discovery_db = self.discovery_dbname(base_url)
+        discovery_url = self.build_db_url(discovery_db, base_url)
         discovery = DbConnPool(discovery_url)
         try:
             try:
@@ -361,16 +366,16 @@ class DbConnPoolRegistry:
 
     def _register(self, environment: str, name: str, base_url: Optional[str] = None) -> None:
         """Store a lazy pool and its serialization lock for (environment, name)."""
-        url = self._build_db_url(name, base_url if base_url is not None else self._base_urls.get(environment))
+        url = self.build_db_url(name, base_url if base_url is not None else self._base_urls.get(environment))
         key = (environment, name)
         self._pools[key] = DbConnPool(url)
         self._locks[key] = asyncio.Lock()
 
-    def _build_db_url(self, dbname: str, base_url: Optional[str] = None) -> str:
+    def build_db_url(self, dbname: str, base_url: Optional[str] = None) -> str:
         """Swap the path (dbname) on a base URL, preserving credentials/host/query."""
         parsed = urlparse((base_url if base_url is not None else self._base_url) or "")
         return urlunparse(parsed._replace(path=f"/{dbname}"))
 
-    def _discovery_dbname(self, base_url: str) -> str:
+    def discovery_dbname(self, base_url: str) -> str:
         parsed = urlparse(base_url)
         return parsed.path.lstrip("/") or "postgres"

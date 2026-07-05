@@ -650,11 +650,17 @@ async def reconnect(
 def _inject_param_description(param_name: str, desc: str) -> None:
     """Patch a parameter's description on every registered tool that exposes it.
 
-    Mutates tool.parameters in place; FastMCP reads this dict by reference when
-    serving protocol-level list_tools, so the change is visible immediately.
-    Verified on mcp >=1.25.0.
+    Reaches FastMCP's internal ``_tool_manager`` on purpose. The public
+    ``FastMCP.list_tools()`` (mcp 1.25.0) rebuilds fresh protocol-level tool copies
+    on every ``tools/list`` request, so an in-place description patch applied through
+    it would not persist. The by-reference source ``tool.parameters`` dict — the one
+    the manager actually stores and reuses — is only reachable via the internal
+    ``_tool_manager``, which is why the single pyright private-usage suppression
+    below is kept deliberately. Migrating to standalone ``fastmcp`` 3.x (whose public
+    ``ArgTransform`` sets argument descriptions cleanly) is the eventual clean fix,
+    tracked separately.
     """
-    # Guards against future mcp SDK changes to the internal tool-registry API:
+    # Guard against future mcp SDK changes to the internal tool-registry API:
     # a broken description patch must not abort server startup.
     try:
         for tool in mcp._tool_manager.list_tools():  # pyright: ignore[reportPrivateUsage]
@@ -697,7 +703,7 @@ def _register_execute_sql_tool() -> None:
         )
 
 
-def _apply_env_allowlist(connections: dict[str, Any]) -> dict[str, Any]:
+def apply_env_allowlist(connections: dict[str, Any]) -> dict[str, Any]:
     """Filter ``connections`` by the ``LMHC_DB_ENVS`` allowlist (multi-environment path).
 
     Unset/blank -> all provisioned environments active. Set -> keep only listed names;
@@ -718,7 +724,7 @@ def _apply_env_allowlist(connections: dict[str, Any]) -> dict[str, Any]:
     return filtered
 
 
-def _load_connections_file(path: str) -> dict[str, Any]:
+def load_connections_file(path: str) -> dict[str, Any]:
     """Load a declarative multi-environment connections map from a JSON file.
 
     The file maps ``environment -> {"base_dsn": str, "databases": [str, ...]}`` — the same shape
@@ -816,7 +822,7 @@ async def main():
     if args.connections_file:
         if args.databases:
             parser.error("--connections-file and --databases are mutually exclusive (multi-environment vs single-host mode)")
-        connections = _load_connections_file(args.connections_file)
+        connections = load_connections_file(args.connections_file)
         await run_multi(
             connections,
             access_mode=args.access_mode,
@@ -921,7 +927,7 @@ async def run_multi(
     logger.info(f"Starting PostgreSQL MCP Server (multi-environment) in {current_access_mode.upper()} mode")
 
     # Apply the LMHC_DB_ENVS allowlist over the provisioned environments.
-    active = _apply_env_allowlist(connections)
+    active = apply_env_allowlist(connections)
 
     # Non-fatal, parallel per-environment probing -> availability map.
     global db_registry
