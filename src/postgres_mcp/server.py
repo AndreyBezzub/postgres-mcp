@@ -8,10 +8,12 @@ import signal
 import sys
 from enum import Enum
 from typing import Any
+from typing import Callable
 from typing import List
 from typing import Literal
 from typing import Optional
 from typing import Union
+from urllib.parse import quote
 
 import mcp.types as types
 from mcp.server.fastmcp import FastMCP
@@ -724,15 +726,84 @@ def apply_env_allowlist(connections: dict[str, Any]) -> dict[str, Any]:
     return filtered
 
 
-def load_connections_file(path: str) -> dict[str, Any]:
-    """Load a declarative multi-environment connections map from a JSON file.
+def _assemble_dsn(host, port, user, password, dbname, sslmode=None) -> str:
+    """Build one postgresql:// DSN with percent-encoded userinfo (mirrors the plugin's build_uri
+    so the two cannot drift). safe='' encodes every reserved char in user/password."""
+    userinfo = f"{quote(str(user), safe='')}:{quote(str(password), safe='')}"
+    hostport = f"{host}:{port}" if port else str(host)
+    dsn = f"postgresql://{userinfo}@{hostport}/{dbname}"
+    if sslmode:
+        dsn += f"?sslmode={sslmode}"
+    return dsn
 
-    The file maps ``environment -> {"base_dsn": str, "databases": [str, ...]}`` — the same shape
-    ``run_multi`` accepts. Per-environment validation (missing/None ``base_dsn`` etc.) is left to the
-    non-fatal ``register_environments`` probe; this loader only guards the file-level shape so a typo
-    fails fast with a clear message instead of a deep traceback. Exits(1) on a missing file, invalid
-    JSON, or a non-object / empty top level.
-    """
+
+def _resolve_password(source: Any, env: str, secret_resolver: Optional[Callable[[Any, str], str]] = None) -> str:
+    """Resolve a typed password source to a plaintext string. Sources: a literal string; {"env": VAR};
+    {"file": path}; {"keyring": {"service","username"}} (lazy import, needs the postgres-mcp[keyring]
+    extra). An unrecognised dict shape defers to secret_resolver if given, else raises. Raises on any
+    failure; the caller turns that into a non-fatal unreachable environment."""
+    if isinstance(source, str):
+        return source
+    if isinstance(source, dict):
+        if "env" in source:
+            var = source["env"]
+            val = os.environ.get(var)
+            if val is None:
+                raise KeyError(f"environment variable '{var}' is not set")
+            return val
+        if "file" in source:
+            with open(source["file"], encoding="utf-8") as f:
+                return f.read().rstrip("\r\n")
+        if "keyring" in source:
+            try:
+                import keyring
+            except ImportError as e:
+                raise RuntimeError("keyring password source requires: pip install postgres-mcp[keyring]") from e
+            spec = source["keyring"]
+            pwd = keyring.get_password(spec["service"], spec["username"])
+            if pwd is None:
+                raise RuntimeError(f"keyring has no password for service='{spec['service']}' username='{spec['username']}'")
+            return pwd
+        if secret_resolver is not None:
+            return secret_resolver(source, env)
+    raise ValueError(f"unsupported password source for environment '{env}': {source!r}")
+
+
+def resolve_connections(data: dict[str, Any], secret_resolver: Optional[Callable[[Any, str], str]] = None) -> dict[str, Any]:
+    """Resolve a connections schema dict into the {env: {base_dsn, databases}} map run_multi expects.
+
+    Two per-env shapes: inline {base_dsn, databases} (passed through unchanged) and structured
+    {host, port?, user, dbname, sslmode?, password: <source>, databases} (assembled here). Top-level
+    keys starting with '_' are reserved (e.g. _settings) and skipped. A per-env resolution failure is
+    NON-FATAL: it logs a warning and yields base_dsn=None, which register_environments records as
+    unreachable — one bad entry never aborts the load (file-level errors still exit in the loader)."""
+    resolved: dict[str, Any] = {}
+    for env, spec in data.items():
+        if env.startswith("_"):
+            continue
+        databases = spec.get("databases", []) if isinstance(spec, dict) else []
+        base_dsn = spec.get("base_dsn") if isinstance(spec, dict) else None
+        if isinstance(base_dsn, str) and base_dsn:
+            resolved[env] = {"base_dsn": base_dsn, "databases": databases}
+            continue
+        try:
+            if not isinstance(spec, dict):
+                raise ValueError("environment entry must be a JSON object")
+            password = _resolve_password(spec["password"], env, secret_resolver)
+            dsn = _assemble_dsn(spec["host"], spec.get("port"), spec["user"], password, spec["dbname"], spec.get("sslmode"))
+            resolved[env] = {"base_dsn": dsn, "databases": databases}
+        except Exception as e:  # any resolution failure -> non-fatal unreachable env
+            logger.warning("Environment '%s' could not be resolved (recorded unreachable): %s", env, e)
+            resolved[env] = {"base_dsn": None, "databases": databases}
+    return resolved
+
+
+def load_connections_file(path: str, secret_resolver: Optional[Callable[[Any, str], str]] = None) -> dict[str, Any]:
+    """Load + resolve a declarative multi-environment connections file.
+
+    File-level errors (missing file, invalid JSON, non-object / empty top level) exit(1) with a clear
+    message. Per-environment resolution (password sources, DSN assembly) is delegated to
+    resolve_connections and is NON-FATAL. See resolve_connections for the accepted schema."""
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -744,11 +815,11 @@ def load_connections_file(path: str) -> dict[str, Any]:
         sys.exit(1)
     if not isinstance(data, dict) or not data:
         logger.error(
-            "Connections file %s must be a non-empty JSON object mapping environment -> {base_dsn, databases}",
+            "Connections file %s must be a non-empty JSON object mapping environment -> {base_dsn|host+password, databases}",
             path,
         )
         sys.exit(1)
-    return data
+    return resolve_connections(data, secret_resolver)
 
 
 async def main():

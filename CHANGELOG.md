@@ -5,6 +5,41 @@ scheme in [`VERSIONING.md`](./VERSIONING.md): `vMAJOR.MINOR.PATCH-hc.N`, where
 `MAJOR.MINOR.PATCH` is classified from Conventional Commits and `-hc.N` marks a
 fork release. Release tags are cut on `main` after a squash-merge.
 
+## v1.3.0-hc.1 — Unified connections-file schema (typed password sources)
+
+One connections-file schema now serves both the standalone CLI and the (future) plugin, so the
+password no longer has to sit in plaintext inside a DSN on disk. Each environment entry is EITHER the
+existing **inline** `{base_dsn, databases}` (unchanged, fully back-compatible) OR a **structured**
+`{host, port?, user, dbname, sslmode?, password: <source>, databases}` whose DSN is assembled at
+startup with percent-encoded userinfo. Classified as a **MINOR** (additive feature, back-compat
+preserved).
+
+### Added
+
+- **Typed password sources**, resolved natively by the fork: a literal string, `{"env": "VAR"}`
+  (`os.environ`), `{"file": "path"}` (read + trailing line endings stripped), and
+  `{"keyring": {"service","username"}}`. The keyring source uses a **lazy `import keyring`** gated
+  behind a new optional extra `postgres-mcp[keyring]`, so the base fork keeps NO hard keyring
+  dependency; a helpful error is raised if the extra is absent.
+- **`resolve_connections(data, secret_resolver=None)`** turns a raw schema dict into the
+  `{env: {base_dsn, databases}}` map `run_multi` expects, and **`load_connections_file`** now delegates
+  per-environment resolution to it. Both are exported from `postgres_mcp` (`from postgres_mcp import
+  load_connections_file`). An optional `secret_resolver` callback is the extension seam for future
+  custom source shapes (consulted only for an unrecognised dict shape).
+
+### Notes
+
+- **Inline `base_dsn` entries are unchanged** — a fully-inline file resolves to a map identical to its
+  input, so existing configs and tests keep working.
+- **Reserved `_` keys.** Top-level keys beginning with `_` (e.g. `_settings`) are skipped, so a config
+  carrying its own metadata block can be fed to the loader unchanged.
+- **Per-environment resolution failures stay non-fatal.** A missing field, an unset env var, a keyring
+  miss / missing extra, an unreadable file, or an unsupported source logs a warning and yields
+  `base_dsn=None` — which `register_environments` records as unreachable — instead of aborting the
+  load. File-level errors (missing file, bad JSON, non-object / empty) still `exit(1)` as before.
+- **`run_multi` and the registry are untouched** — the loader still resolves to the same
+  `{env: {base_dsn, databases}}` contract.
+
 ## v1.2.0-hc.1 — Fail-fast when no database is accessible (multi-env)
 
 The multi-environment entry point (`run_multi`, used by the lmhc-db plugin) now **exits with code 1
