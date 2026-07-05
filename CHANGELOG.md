@@ -5,6 +5,18 @@ scheme in [`VERSIONING.md`](./VERSIONING.md): `vMAJOR.MINOR.PATCH-hc.N`, where
 `MAJOR.MINOR.PATCH` is classified from Conventional Commits and `-hc.N` marks a
 fork release. Release tags are cut on `main` after a squash-merge.
 
+## v2.0.0-hc.1 — Rename the environment allowlist variable `LMHC_DB_ENVS` → `ALLOWED_ENVS`
+
+### Changed (breaking)
+
+- The multi-environment allowlist is now read from **`ALLOWED_ENVS`** (was `LMHC_DB_ENVS`). Set
+  `ALLOWED_ENVS` instead — the old name is no longer consulted and there is no compatibility fallback.
+  Semantics are unchanged: unset/blank → all provisioned environments active; a comma-separated list →
+  only those, with unknown names dropped via a startup warning (never a crash). Rationale: the previous
+  name carried a downstream vendor prefix, but the server reads this variable itself, so a neutral,
+  self-scoped name is used. Classified **MAJOR** — a breaking rename of a public configuration
+  variable with no compatibility shim.
+
 ## v1.3.0-hc.1 — Unified connections-file schema (typed password sources)
 
 One connections-file schema now serves both the standalone CLI and the (future) plugin, so the

@@ -7,7 +7,7 @@
 > **Superseded/extended by `v1.0.0-hc.1` multi-environment support (see [`CHANGELOG.md`](./CHANGELOG.md)).**
 > These notes describe the original multi-*database* feature (`--databases`, one PG host). The
 > shipped registry now keys pools by **`(environment, database)`** and also drives a
-> multi-*environment* path (`run_multi`, non-fatal startup, `reconnect`, `LMHC_DB_ENVS`). Where
+> multi-*environment* path (`run_multi`, non-fatal startup, `reconnect`, `ALLOWED_ENVS`). Where
 > this document says "keyed by database name", read "keyed by `(environment, database)`" — the
 > single/`--databases` path uses a synthetic default environment.
 
