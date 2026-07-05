@@ -270,7 +270,43 @@ How it works:
 
 The `--databases` mode above serves several databases on **one** PostgreSQL host that share **one** set of credentials. **Multi-environment mode** goes further: a single server can front **several PostgreSQL servers** — for example separate `uat1`, `uat2`, `prep`, `prod`, and a `prod-replica` — each with its own DSN and its own set of databases. This is the model used by the HootCore `lmhc-db` plugin, which resolves credentials per environment and starts the server through the `run_multi` entry point rather than the CLI.
 
-Unlike the CLI (`main()`), multi-environment mode is driven programmatically via `run_multi(connections, access_mode, transport)`:
+### Declarative config (`--connections-file`)
+
+For standalone use the simplest path is `--connections-file`: point it at a JSON file that maps each
+environment to its DSN and database list — the multi-environment analogue of `--databases`, with no
+Python required.
+
+```json
+// envs.json
+{
+  "prod":         { "base_dsn": "postgresql://user:pw@prod-host:5432/postgres",    "databases": ["orders", "catalog"] },
+  "prod-replica": { "base_dsn": "postgresql://user:pw@replica-host:5432/postgres", "databases": ["orders"] },
+  "uat2":         { "base_dsn": "postgresql://user:pw@uat2-host:5432/postgres",    "databases": ["orders"] }
+}
+```
+
+```json
+{
+  "mcpServers": {
+    "pg": {
+      "command": "postgres-mcp",
+      "args": ["--connections-file", "/absolute/path/to/envs.json"],
+      "env": { "LMHC_DB_ENVS": "prod,prod-replica" }
+    }
+  }
+}
+```
+
+Each entry is one `environment -> {base_dsn, databases}`. Passing `--databases` alongside
+`--connections-file` is rejected as an explicit conflict; a single-host `DATABASE_URI` env var or
+positional URL is simply ignored (the file takes precedence). As with `--databases`, credentials live
+in the config you control (here the file) rather than being resolved in code. `LMHC_DB_ENVS` still
+applies — omit it to activate every environment in the file, or set it to a comma-separated subset.
+Per-environment problems stay non-fatal (see the key behaviors below).
+
+### Programmatic config (`run_multi`, for embedding)
+
+When you embed the server in a host that resolves credentials itself (rather than reading a file), drive it programmatically:
 
 ```python
 # launcher.py — resolve your credentials however you like (Vault, a secrets
@@ -293,7 +329,7 @@ run_multi(
 
 ### Registering it with an MCP client
 
-Because this mode has no CLI entry point (the `postgres-mcp` console script drives the single/`--databases` `main()` path only), you register the **launcher above** as an ordinary stdio server — its `command` runs your `launcher.py` instead of `postgres-mcp`:
+Because this mode takes an already-resolved in-memory connections map, it has no CLI entry point (the `postgres-mcp` console script drives the file-based paths — single-host, `--databases`, and `--connections-file` — not an in-memory map), so you register the **launcher above** as an ordinary stdio server — its `command` runs your `launcher.py` instead of `postgres-mcp`:
 
 ```json
 {

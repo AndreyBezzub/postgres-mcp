@@ -5,6 +5,22 @@ scheme in [`VERSIONING.md`](./VERSIONING.md): `vMAJOR.MINOR.PATCH-hc.N`, where
 `MAJOR.MINOR.PATCH` is classified from Conventional Commits and `-hc.N` marks a
 fork release. Release tags are cut on `main` after a squash-merge.
 
+## v1.1.0-hc.1 — Declarative multi-environment config (`--connections-file`)
+
+Lets a **standalone** server enter multi-environment mode from a JSON file, with no Python launcher —
+the multi-environment analogue of `--databases`. Classified as a **MINOR** bump (backward-compatible
+`feat:`): existing single-host / `--databases` / `run_multi` callers are unaffected.
+
+### Added
+
+- **`--connections-file <path>` CLI flag.** Reads a JSON object mapping
+  `environment -> {"base_dsn": str, "databases": [str, ...]}` and starts the server through the
+  existing `run_multi` path. Mutually exclusive with `--databases`; on a missing file, invalid JSON,
+  or a non-object / empty top level the server exits with a clear message. Per-environment validation
+  stays non-fatal (unreachable / malformed entries are recorded in the availability map, never abort
+  startup). The `LMHC_DB_ENVS` allowlist applies to the loaded map exactly as on the programmatic
+  `run_multi` path.
+
 ## v1.0.0-hc.1 — Multi-environment (multi-server) support
 
 **BREAKING CHANGE.** This release adds a multi-environment entry point and makes

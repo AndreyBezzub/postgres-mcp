@@ -1,6 +1,7 @@
 # ruff: noqa: B008
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -717,6 +718,33 @@ def _apply_env_allowlist(connections: dict[str, Any]) -> dict[str, Any]:
     return filtered
 
 
+def _load_connections_file(path: str) -> dict[str, Any]:
+    """Load a declarative multi-environment connections map from a JSON file.
+
+    The file maps ``environment -> {"base_dsn": str, "databases": [str, ...]}`` — the same shape
+    ``run_multi`` accepts. Per-environment validation (missing/None ``base_dsn`` etc.) is left to the
+    non-fatal ``register_environments`` probe; this loader only guards the file-level shape so a typo
+    fails fast with a clear message instead of a deep traceback. Exits(1) on a missing file, invalid
+    JSON, or a non-object / empty top level.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        logger.error("Connections file not found: %s", path)
+        sys.exit(1)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.error("Could not read connections file %s: %s", path, e)
+        sys.exit(1)
+    if not isinstance(data, dict) or not data:
+        logger.error(
+            "Connections file %s must be a non-empty JSON object mapping environment -> {base_dsn, databases}",
+            path,
+        )
+        sys.exit(1)
+    return data
+
+
 async def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="PostgreSQL MCP Server")
@@ -766,12 +794,39 @@ async def main():
         default=8000,
         help="Port for streamable HTTP server (default: 8000)",
     )
+    parser.add_argument(
+        "--connections-file",
+        type=str,
+        default=None,
+        help='Path to a JSON file mapping environment -> {"base_dsn": str, "databases": [str, ...]} '
+        "for multi-environment mode. Mutually exclusive with the single-host / --databases path; "
+        "credentials live in the file, not in argv or DATABASE_URI.",
+    )
 
     args = parser.parse_args()
 
     # Store the access mode in the global variable
     global current_access_mode
     current_access_mode = AccessMode(args.access_mode)
+
+    # Declarative multi-environment mode: a JSON file replaces the single DATABASE_URI.
+    # Routed through the existing run_multi() path (which registers execute_sql, applies the
+    # LMHC_DB_ENVS allowlist, probes non-fatally, and starts the transport). Placed before
+    # _register_execute_sql_tool() below so that registration happens exactly once.
+    if args.connections_file:
+        if args.databases:
+            parser.error("--connections-file and --databases are mutually exclusive (multi-environment vs single-host mode)")
+        connections = _load_connections_file(args.connections_file)
+        await run_multi(
+            connections,
+            access_mode=args.access_mode,
+            transport=args.transport,
+            sse_host=args.sse_host,
+            sse_port=args.sse_port,
+            streamable_http_host=args.streamable_http_host,
+            streamable_http_port=args.streamable_http_port,
+        )
+        return
 
     database_names = list(dict.fromkeys(d.strip() for d in args.databases.split(",") if d.strip())) if args.databases else None
 
