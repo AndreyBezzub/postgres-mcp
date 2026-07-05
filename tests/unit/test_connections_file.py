@@ -23,7 +23,7 @@ def test_load_valid(tmp_path):
     path = tmp_path / "envs.json"
     path.write_text(json.dumps(VALID_MAP), encoding="utf-8")
 
-    result = server._load_connections_file(str(path))  # pyright: ignore[reportPrivateUsage]
+    result = server.load_connections_file(str(path))
 
     assert result == VALID_MAP
 
@@ -32,7 +32,7 @@ def test_load_missing_file(tmp_path):
     """A nonexistent path exits(1)."""
     missing = tmp_path / "does-not-exist.json"
     with pytest.raises(SystemExit):
-        server._load_connections_file(str(missing))  # pyright: ignore[reportPrivateUsage]
+        server.load_connections_file(str(missing))
 
 
 def test_load_invalid_json(tmp_path):
@@ -40,7 +40,7 @@ def test_load_invalid_json(tmp_path):
     path = tmp_path / "bad.json"
     path.write_text("{ not json", encoding="utf-8")
     with pytest.raises(SystemExit):
-        server._load_connections_file(str(path))  # pyright: ignore[reportPrivateUsage]
+        server.load_connections_file(str(path))
 
 
 def test_load_non_object(tmp_path):
@@ -48,12 +48,12 @@ def test_load_non_object(tmp_path):
     array_path = tmp_path / "array.json"
     array_path.write_text("[]", encoding="utf-8")
     with pytest.raises(SystemExit):
-        server._load_connections_file(str(array_path))  # pyright: ignore[reportPrivateUsage]
+        server.load_connections_file(str(array_path))
 
     empty_path = tmp_path / "empty.json"
     empty_path.write_text("{}", encoding="utf-8")
     with pytest.raises(SystemExit):
-        server._load_connections_file(str(empty_path))  # pyright: ignore[reportPrivateUsage]
+        server.load_connections_file(str(empty_path))
 
 
 @pytest.mark.asyncio

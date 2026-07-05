@@ -6,7 +6,6 @@ import pytest
 
 import postgres_mcp.server as server
 from postgres_mcp.server import AccessMode
-from postgres_mcp.sql.db_conn_pool_registry import DEFAULT_ENV
 from postgres_mcp.sql.db_conn_pool_registry import DbConnPoolRegistry
 from postgres_mcp.sql.sql_driver import SqlDriver
 
@@ -43,10 +42,9 @@ class TestMultiDatabase:
         reg = DbConnPoolRegistry()
         try:
             await reg.validate_and_register(conn_str, ["orders", "catalog"])
-            catalog_pool = reg._pools[(DEFAULT_ENV, "catalog")]  # pyright: ignore[reportPrivateUsage]
-            assert catalog_pool.is_valid is False  # not opened by registration
+            assert reg.is_open("catalog") is False  # not opened by registration
             await reg.get_pool("catalog")
-            assert catalog_pool.is_valid is True  # opened on first access
+            assert reg.is_open("catalog") is True  # opened on first access
         finally:
             await reg.close_all()
 

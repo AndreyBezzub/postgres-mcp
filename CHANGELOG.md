@@ -5,6 +5,36 @@ scheme in [`VERSIONING.md`](./VERSIONING.md): `vMAJOR.MINOR.PATCH-hc.N`, where
 `MAJOR.MINOR.PATCH` is classified from Conventional Commits and `-hc.N` marks a
 fork release. Release tags are cut on `main` after a squash-merge.
 
+## v1.1.1-hc.1 — Remove pyright private-usage suppressions (refactor)
+
+Removes the accumulated `# pyright: ignore[reportPrivateUsage]` "crutches" by giving tests a
+legitimate public surface instead of loosening the type checker. `typeCheckingMode="standard"` +
+`reportPrivateUsage=true` stay ON. Classified as a **PATCH** (internal `refactor:` — no public API
+or runtime behavior change).
+
+### Changed
+
+- **Promoted four pure helpers from private to public** so tests reach them through a supported
+  surface: `apply_env_allowlist` and `load_connections_file` (`server`), plus `build_db_url` and
+  `discovery_dbname` (`DbConnPoolRegistry`).
+- **Rewrote the white-box registry tests onto the public API.** Single-mode seeding now runs through
+  `validate_and_register(base_url, None)` (with the `DbConnPool` factory patched) instead of poking
+  `_mode` / `_pools`; the `build_db_url` / `discovery_dbname` tests call the public methods directly.
+
+### Added
+
+- **`DbConnPoolRegistry.is_open(name, environment=DEFAULT_ENV)`** — public introspection of whether a
+  lazy pool has actually been opened, replacing the integration test's direct `_pools` access.
+
+### Notes
+
+- The **only** remaining `reportPrivateUsage` suppression is FastMCP-internal
+  (`mcp._tool_manager.list_tools()` in `server.py`): the public `FastMCP.list_tools()` rebuilds fresh
+  protocol copies per `tools/list` request, so an in-place parameter-description patch would not
+  persist and must go through the internal manager. Migrating to standalone `fastmcp` 3.x
+  (`ArgTransform`) is the eventual clean fix, tracked separately.
+- No runtime behavior change.
+
 ## v1.1.0-hc.1 — Declarative multi-environment config (`--connections-file`)
 
 Lets a **standalone** server enter multi-environment mode from a JSON file, with no Python launcher —
