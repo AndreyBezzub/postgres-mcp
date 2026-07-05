@@ -78,7 +78,42 @@ However, it often makes sense to use whichever method you are most familiar with
 
 ### Installation
 
+> **Note — this is a fork.** `AndreyBezzub/postgres-mcp` is a fork of `crystaldba/postgres-mcp` with
+> extra HootCore features (multi-environment `--connections-file` with a unified schema and typed
+> password sources, fail-fast startup, and more). It is **not published to PyPI or Docker Hub** — the
+> `postgres-mcp` name there is the upstream project, so the `pipx` / `uv pip install postgres-mcp` /
+> `docker pull crystaldba/postgres-mcp` commands below install the **upstream**, not this fork. To get
+> the fork, use **Option 0**.
+
 Choose one of the following methods to install Postgres MCP Pro:
+
+#### Option 0: Install this fork (git)
+
+The fork is distributed only via git tags `vX.Y.Z-hc.N` (↔ package version `X.Y.Z+hc.N`). Only a
+pushed git **tag** is needed for a pinned install to resolve — no GitHub "Release" object is required.
+
+```bash
+# a specific release — recommended (tags are immutable → reproducible)
+uv pip install "git+https://github.com/AndreyBezzub/postgres-mcp.git@v1.3.0-hc.1"
+# …with the optional keyring password source
+uv pip install "postgres-mcp[keyring] @ git+https://github.com/AndreyBezzub/postgres-mcp.git@v1.3.0-hc.1"
+# …or track the latest code on main (add --upgrade / uvx --refresh to bust the git cache)
+uv pip install --upgrade "git+https://github.com/AndreyBezzub/postgres-mcp.git@main"
+```
+
+Run it without installing, straight from an MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "postgres": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/AndreyBezzub/postgres-mcp.git@v1.3.0-hc.1",
+               "postgres-mcp", "--connections-file", "/absolute/path/to/envs.json"]
+    }
+  }
+}
+```
 
 #### Option 1: Using Docker
 
@@ -799,7 +834,7 @@ The instructions below are for developers who want to work on Postgres MCP Pro, 
 2. **Clone the repository**:
 
    ```bash
-   git clone https://github.com/crystaldba/postgres-mcp.git
+   git clone https://github.com/AndreyBezzub/postgres-mcp.git
    cd postgres-mcp
    ```
 
