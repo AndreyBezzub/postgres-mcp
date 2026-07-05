@@ -599,7 +599,7 @@ async def test_reconnect_scoped_to_named_environment():
 async def test_run_multi_starts_despite_malformed_env_spec(monkeypatch):
     """server.run_multi() reaches the transport-run stage without raising when one
     environment's spec is malformed; the good env is reachable, the bad one recorded."""
-    monkeypatch.delenv("LMHC_DB_ENVS", raising=False)
+    monkeypatch.delenv("ALLOWED_ENVS", raising=False)
     ctrl = {"down": False}
     env_by_host = {"host-a": _make_env_pool(["test_db"], ctrl)}
     fresh = DbConnPoolRegistry()
@@ -626,23 +626,23 @@ async def test_run_multi_starts_despite_malformed_env_spec(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# F4 — LMHC_DB_ENVS allowlist (apply_env_allowlist): unset -> all; set -> filter;
+# F4 — ALLOWED_ENVS allowlist (apply_env_allowlist): unset -> all; set -> filter;
 # unknown -> dropped with a warning, never a crash; empty result -> still returns.
 # --------------------------------------------------------------------------- #
 def test_apply_env_allowlist_unset_returns_all(monkeypatch):
-    monkeypatch.delenv("LMHC_DB_ENVS", raising=False)
+    monkeypatch.delenv("ALLOWED_ENVS", raising=False)
     conns = {"prep": {"a": 1}, "prod": {"b": 2}}
     assert server.apply_env_allowlist(conns) == conns
 
 
 def test_apply_env_allowlist_blank_returns_all(monkeypatch):
-    monkeypatch.setenv("LMHC_DB_ENVS", "   ")
+    monkeypatch.setenv("ALLOWED_ENVS", "   ")
     conns = {"prep": {}, "prod": {}}
     assert server.apply_env_allowlist(conns) == conns
 
 
 def test_apply_env_allowlist_filters_to_listed(monkeypatch):
-    monkeypatch.setenv("LMHC_DB_ENVS", "prod, prep")  # whitespace tolerated
+    monkeypatch.setenv("ALLOWED_ENVS", "prod, prep")  # whitespace tolerated
     conns = {"prep": {"a": 1}, "prod": {"b": 2}, "uat1": {"c": 3}}
     out = server.apply_env_allowlist(conns)
     assert set(out) == {"prep", "prod"}
@@ -651,14 +651,14 @@ def test_apply_env_allowlist_filters_to_listed(monkeypatch):
 
 
 def test_apply_env_allowlist_drops_unknown_without_crashing(monkeypatch):
-    monkeypatch.setenv("LMHC_DB_ENVS", "prod,ghost")
+    monkeypatch.setenv("ALLOWED_ENVS", "prod,ghost")
     conns = {"prep": {}, "prod": {}}
     out = server.apply_env_allowlist(conns)
     assert set(out) == {"prod"}  # unknown 'ghost' silently dropped (with warning), no crash
 
 
 def test_apply_env_allowlist_all_unknown_starts_with_zero(monkeypatch):
-    monkeypatch.setenv("LMHC_DB_ENVS", "ghost1,ghost2")
+    monkeypatch.setenv("ALLOWED_ENVS", "ghost1,ghost2")
     conns = {"prep": {}, "prod": {}}
     out = server.apply_env_allowlist(conns)
     assert out == {}  # every name unknown -> zero active envs, but still returns (server starts)

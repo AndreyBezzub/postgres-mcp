@@ -326,7 +326,7 @@ Python required.
     "pg": {
       "command": "postgres-mcp",
       "args": ["--connections-file", "/absolute/path/to/envs.json"],
-      "env": { "LMHC_DB_ENVS": "prod,prod-replica" }
+      "env": { "ALLOWED_ENVS": "prod,prod-replica" }
     }
   }
 }
@@ -335,7 +335,7 @@ Python required.
 Each entry is one `environment -> {base_dsn, databases}`. Passing `--databases` alongside
 `--connections-file` is rejected as an explicit conflict; a single-host `DATABASE_URI` env var or
 positional URL is simply ignored (the file takes precedence). As with `--databases`, credentials live
-in the config you control (here the file) rather than being resolved in code. `LMHC_DB_ENVS` still
+in the config you control (here the file) rather than being resolved in code. `ALLOWED_ENVS` still
 applies — omit it to activate every environment in the file, or set it to a comma-separated subset.
 Per-environment problems stay non-fatal (see the key behaviors below).
 
@@ -411,20 +411,20 @@ Because this mode takes an already-resolved in-memory connections map, it has no
       "command": "python",
       "args": ["/absolute/path/to/launcher.py"],
       "env": {
-        "LMHC_DB_ENVS": "prod,prod-replica"
+        "ALLOWED_ENVS": "prod,prod-replica"
       }
     }
   }
 }
 ```
 
-Note the contrast with `--databases` mode: **no `DATABASE_URI` and no credentials appear in the client config.** The launcher resolves them into the in-memory `connections` map, so secrets never pass through `argv` or a shared environment variable. `LMHC_DB_ENVS` is optional — omit it to activate every environment the launcher provides, or set it to a comma-separated subset (see the allowlist behavior below). The HootCore `lmhc-db` plugin ships exactly such a launcher (`scripts/launch.py`, which reads its connections from a local credential store) behind a small `.cmd` shim referenced from its `plugin.json` `mcpServers` block.
+Note the contrast with `--databases` mode: **no `DATABASE_URI` and no credentials appear in the client config.** The launcher resolves them into the in-memory `connections` map, so secrets never pass through `argv` or a shared environment variable. `ALLOWED_ENVS` is optional — omit it to activate every environment the launcher provides, or set it to a comma-separated subset (see the allowlist behavior below). The HootCore `lmhc-db` plugin ships exactly such a launcher (`scripts/launch.py`, which reads its connections from a local credential store) behind a small `.cmd` shim referenced from its `plugin.json` `mcpServers` block.
 
 Key behaviors:
 
 - **`environment` argument on every SQL tool.** In multi-environment mode each SQL tool (`execute_sql`, `list_schemas`, `explain_query`, …) requires **both** `environment` and `database_name` — there is no single default DSN to fall back to. The LLM selects the environment per call.
 - **Non-fatal startup.** Every environment is probed in parallel with a short timeout. An unreachable host (VPN/PG down), a probe timeout, or a malformed/incomplete spec (missing or `None` `base_dsn`) is recorded as `reachable=false` in an availability map — it never aborts the server. The server **always** starts; one bad environment never takes down the others.
-- **`LMHC_DB_ENVS` allowlist.** Unset → all provisioned environments are active. Set to a comma-separated list → only those environments are activated; unknown names are dropped with a startup warning, never a crash.
+- **`ALLOWED_ENVS` allowlist.** Unset → all provisioned environments are active. Set to a comma-separated list → only those environments are activated; unknown names are dropped with a startup warning, never a crash.
 - **`list_databases`** returns the global availability map (`{"mode": "multi-env", "environments": {env: {reachable, dbs_ok, dbs_missing, error}}}`) so the agent can see which environments and databases are currently usable.
 - **`reconnect` recovery.** If an environment goes unreachable mid-session (e.g. the VPN dropped), call `reconnect` once it is back to re-probe **only** the currently-unreachable environments and rebuild their pools; healthy environments and their in-flight queries are left untouched. Pass `reconnect(environment="prod")` to force a re-probe of one specific environment. No server restart needed (lazy per-touch recovery also works).
 

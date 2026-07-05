@@ -706,23 +706,23 @@ def _register_execute_sql_tool() -> None:
 
 
 def apply_env_allowlist(connections: dict[str, Any]) -> dict[str, Any]:
-    """Filter ``connections`` by the ``LMHC_DB_ENVS`` allowlist (multi-environment path).
+    """Filter ``connections`` by the ``ALLOWED_ENVS`` allowlist (multi-environment path).
 
     Unset/blank -> all provisioned environments active. Set -> keep only listed names;
     unknown names are dropped with a WARNING (never a crash). Filtering to an empty set
     is honored (the server still starts, with zero active environments).
     """
-    raw = os.environ.get("LMHC_DB_ENVS")
+    raw = os.environ.get("ALLOWED_ENVS")
     if not raw or not raw.strip():
         return dict(connections)
     requested = list(dict.fromkeys(e.strip() for e in raw.split(",") if e.strip()))
     provisioned = set(connections)
     for name in requested:
         if name not in provisioned:
-            logger.warning("LMHC_DB_ENVS: ignoring unknown environment '%s' (not provisioned)", name)
+            logger.warning("ALLOWED_ENVS: ignoring unknown environment '%s' (not provisioned)", name)
     filtered = {name: connections[name] for name in requested if name in provisioned}
     if not filtered:
-        logger.warning("LMHC_DB_ENVS filtered out every environment; the server will start with zero active environments")
+        logger.warning("ALLOWED_ENVS filtered out every environment; the server will start with zero active environments")
     return filtered
 
 
@@ -888,7 +888,7 @@ async def main():
 
     # Declarative multi-environment mode: a JSON file replaces the single DATABASE_URI.
     # Routed through the existing run_multi() path (which registers execute_sql, applies the
-    # LMHC_DB_ENVS allowlist, probes non-fatally, and starts the transport). Placed before
+    # ALLOWED_ENVS allowlist, probes non-fatally, and starts the transport). Placed before
     # _register_execute_sql_tool() below so that registration happens exactly once.
     if args.connections_file:
         if args.databases:
@@ -997,7 +997,7 @@ async def run_multi(
 
     logger.info(f"Starting PostgreSQL MCP Server (multi-environment) in {current_access_mode.upper()} mode")
 
-    # Apply the LMHC_DB_ENVS allowlist over the provisioned environments.
+    # Apply the ALLOWED_ENVS allowlist over the provisioned environments.
     active = apply_env_allowlist(connections)
 
     # Non-fatal, parallel per-environment probing -> availability map.

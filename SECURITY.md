@@ -295,7 +295,7 @@ A concrete example of Posture B, as deployed for the HootCore platform (verified
   marketplace as the `lmhc-db` plugin. Since `v1.0.0-hc.1` it runs as a **single `pg`
   server** (started through `run_multi`) that fronts every provisioned environment —
   `env ∈ {uat1, uat2, prep, prod, prod-replica}` — with the target selected per call by the
-  `environment` tool argument (gated by the `LMHC_DB_ENVS` allowlist), not by a
+  `environment` tool argument (gated by the `ALLOWED_ENVS` allowlist), not by a
   per-environment server key. Each environment exposes its own databases
   (`lm-platform-data`, `hc-platform-oms-data`, `lm-e-commerce`, …). The `run_multi` path
   defaults to `--access-mode restricted`; the team runs it `unrestricted` on the strength of
